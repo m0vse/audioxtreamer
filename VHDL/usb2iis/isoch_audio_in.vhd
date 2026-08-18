@@ -47,7 +47,7 @@ architecture rtl of isoch_audio_in is
   signal word_counter: natural range 0 to 512 ;
   signal sample_complete : std_logic;
 
-  signal nr_ins : natural range 0 to (max_sdi_lines-1);
+  signal nr_ins : natural range 0 to max_sdi_lines;
   signal in_fifo_index: natural range 0 to (max_sdi_lines*2)-1;
   signal fifo_rd   : std_logic;
   signal tvalid   : std_logic;
@@ -70,7 +70,11 @@ begin
 
   ------------------------------------------------------------------------------------------------------------
   --not empty, we completed and it fits
-  fifo_rd <= '1' when in_fifo_empty = '0' and (word_counter + (nr_ins*3)) < 512 and (sample_complete = '1' or tvalid <= '0') else '0';
+  fifo_rd <= '1' when in_fifo_empty = '0' and
+                           (word_counter + (nr_ins*3)) < 512 and
+                           (tvalid = '0' or
+                            (sample_complete = '1' and m_axis_tready = '1'))
+             else '0';
 
   ------------------------------------------------------------------------------------------------------------
   --when we are at the last
@@ -84,8 +88,9 @@ begin
         tvalid <= '0';
       elsif fifo_rd = '1' then
         tvalid <= '1';
-      elsif in_fifo_empty = '1' and m_axis_tready = '1' and sample_complete = '1' then
-        tvalid <= '0'; --deassertion only when tready
+      elsif tvalid = '1' and m_axis_tready = '1' and sample_complete = '1' and
+            (in_fifo_empty = '1' or (word_counter + (nr_ins*3)) >= 512) then
+        tvalid <= '0';
       end if;
     end if;
   end process;
@@ -98,14 +103,13 @@ begin
     if rising_edge(clk) then
       if reset = '1' then
         word_counter <= 0;
-      elsif sample_complete = '1' then
-        if in_fifo_empty = '1' or (word_counter + (nr_ins*3)) >= 512 then
+      elsif tvalid = '1' and m_axis_tready = '1' then
+        if sample_complete = '1' and
+           (in_fifo_empty = '1' or (word_counter + (nr_ins*3)) >= 512) then
           word_counter <= 0;
-        elsif in_fifo_empty = '0' and tvalid = '1' and m_axis_tready = '1' and word_counter < 511 then
-          word_counter <= word_counter +1;
+        elsif word_counter < 511 then
+          word_counter <= word_counter + 1;
         end if;
-      elsif tvalid = '1' and m_axis_tready = '1' and word_counter < 511 then
-        word_counter <= word_counter +1;
       end if;
     end if;
   end process;

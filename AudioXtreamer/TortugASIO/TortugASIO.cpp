@@ -510,7 +510,7 @@ ASIOError TortugASIO::createBuffers(ASIOBufferInfo *bufferInfos, long numChannel
   InputBuffers = new uint8_t*[mNumInputs];
   inMap = new long[mNumInputs];
   InputBuffers[0] = new uint8_t[mNumInputs * blockFrames * 3 * 2];
-  ZeroMemory(InputBuffers[0], mNumOutputs * blockFrames * 3 * 2);
+  ZeroMemory(InputBuffers[0], mNumInputs * blockFrames * 3 * 2);
 
   for (i = 0; i < mNumInputs; i++) {
 	InputBuffers[i] = InputBuffers[0] + (blockFrames * 3 * 2) * i;
@@ -569,14 +569,16 @@ ASIOError TortugASIO::disposeBuffers()
   if (bufferActive)
   {
     EnterCriticalSection(&cs);
-      delete OutputBuffers;
+      delete[] OutputBuffers[0];
+      delete[] OutputBuffers;
       OutputBuffers = nullptr;
-      delete outMap;
+      delete[] outMap;
       outMap = nullptr;
 
-      delete InputBuffers;
+      delete[] InputBuffers[0];
+      delete[] InputBuffers;
       InputBuffers = nullptr;
-      delete inMap;
+      delete[] inMap;
       inMap = nullptr;
 
       bufferActive = false;

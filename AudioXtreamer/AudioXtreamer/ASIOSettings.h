@@ -35,7 +35,8 @@ namespace ASIOSettings
 
 #pragma pack(pop)
 
-  static const uint8_t ChanEntires = 16;
+  static const uint8_t InChanEntries = 12;
+  static const uint8_t OutChanEntries = 9;
 };
 
 #define WM_XTREAMER WM_APP + 100

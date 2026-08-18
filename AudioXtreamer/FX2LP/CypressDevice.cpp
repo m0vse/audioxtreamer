@@ -456,7 +456,10 @@ void CypressDevice::main()
   AsioBuff = 0;
   TxBuff = 0;
   TxBuffPos = 0;
-  IsoTxSamples = 0;
+  ZeroMemory(mFeedbackQueue, sizeof(mFeedbackQueue));
+  mFeedbackRead = 0;
+  mFeedbackWrite = 0;
+  mFeedbackCount = 0;
   ClientActive = false;
 
   mTxReqIdx = 0;
@@ -518,6 +521,9 @@ void CypressDevice::main()
     case WAIT_OBJECT_0 + 2: AsioClientCB(); break;//ASIO ready
     case WAIT_OBJECT_0 + 3: RxIsochCB();    break;//rx isoch
     case WAIT_OBJECT_0 + 4: TxIsochCB();    break;//tx iso
+    case WAIT_TIMEOUT:
+      LOG0("USB worker timed out waiting for an event");
+      break;
 
     default: //not good
       if (wfmo == 0xffffffff)
@@ -584,37 +590,31 @@ void CypressDevice::UpdateClient()
 //---------------------------------------------------------------------------------------------
 static uint32_t sSampleCounter = 0;
 
-static uint8_t spp[rxpktCount] = { 0 };
-static uint8_t spNr = 0;
-
 //traverses the spp array copying samples from the asio buff to the microframes based on the received distribution
-uint8_t DistributeSamples( uint8_t* uf_ptrs[rxpktCount] , uint8_t*src, uint8_t NrSamples, uint32_t OUTStride)
+uint32_t DistributeSamples(uint8_t* uf_ptrs[rxpktCount], uint8_t spp[rxpktCount],
+                           uint8_t& spNr, uint8_t* src, uint32_t nrSamples,
+                           uint32_t outStride)
 {
-  uint8_t progress = NrSamples;
-  while( spNr < rxpktCount && NrSamples > 0 )
+  uint32_t progress = nrSamples;
+  while (spNr < rxpktCount && nrSamples > 0)
   {
     if (spp[spNr])
     {
-      uint8_t samples = min(NrSamples, spp[spNr]);
-      uint32_t bytes = samples * OUTStride;
+      uint32_t samples = min(nrSamples, (uint32_t)spp[spNr]);
+      uint32_t bytes = samples * outStride;
       memcpy(uf_ptrs[spNr], src, bytes);
       src += bytes;
-      NrSamples -= samples;
-      spp[spNr] -= samples;
+      nrSamples -= samples;
+      spp[spNr] -= (uint8_t)samples;
 
       uf_ptrs[spNr] += bytes;
       if (spp[spNr] == 0)
-      {
-        //on winusb we cannot control the length of the uframes (crAPI), so a normal 5/6/5/6/5/6 payload will have a whole trailing space.
-        //Put an end mark so the fpga stops, the uframe timer will rearm.
-        *((uint32_t*)(uf_ptrs[spNr])) = 0xaa5555aa;
         spNr++;
-      }
     }
     else
       spNr++;
   }
-  return progress - NrSamples;
+  return progress - nrSamples;
 }
 
 void CypressDevice::TxIsochCB()
@@ -623,68 +623,58 @@ void CypressDevice::TxIsochCB()
         uint8_t* ptr = TxReq.buff;
         ZeroMemory(ptr, IsoSize);
 
-        uint32_t TxSamples = min(IsoTxSamples, IsoSize / OUTStride);
-        // distribute the samples on the microframes based on the last received isoch xfer, implicit feedback
+        uint8_t packetSamples[rxpktCount] = { 0 };
+        if (mFeedbackCount > 0)
+        {
+          memcpy(packetSamples, mFeedbackQueue[mFeedbackRead], sizeof(packetSamples));
+          mFeedbackRead = (mFeedbackRead + 1) % FeedbackQueueDepth;
+          --mFeedbackCount;
+        }
 
-        spNr = 0;
+        uint32_t txSamples = 0;
+        const uint32_t maxPacketSamples = (rxpktSize - sizeof(uint32_t)) / OUTStride;
+        for (uint8_t c = 0; c < rxpktCount; ++c)
+        {
+          if (packetSamples[c] > maxPacketSamples)
+          {
+            packetSamples[c] = (uint8_t)maxPacketSamples;
+            ++mDevStatus.ResyncErrors;
+          }
+          txSamples += packetSamples[c];
+        }
+
+        uint8_t spp[rxpktCount];
+        memcpy(spp, packetSamples, sizeof(spp));
+        uint8_t spNr = 0;
         uint8_t* spp_ptr[rxpktCount] = { 0 };
         for (uint8_t c = 0; c < rxpktCount; ++c)
-          spp_ptr[c] = ptr + (rxpktSize * c);// +(spp[c] * OUTStride);
+          spp_ptr[c] = ptr + (rxpktSize * c);
 
-        //partial TxBuff
-        if (TxSamples > 0 && TxBuffPos > 0 && TxBuff != AsioBuff)
+        while (txSamples > 0 && ClientActive && TxBuff != AsioBuff)
         {
-          uint32_t count = min(nrSamples - TxBuffPos, TxSamples);
+          uint32_t count = min(nrSamples - TxBuffPos, txSamples);
+          uint32_t distributed = DistributeSamples(
+            spp_ptr, spp, spNr,
+            asioOutPtr[TxBuff] + (TxBuffPos * OUTStride), count, OUTStride);
+          if (distributed == 0)
+            break;
 
-          TxBuffPos += DistributeSamples(spp_ptr, asioOutPtr[TxBuff] + (TxBuffPos * OUTStride), count, OUTStride);
-
-          ASSERT(TxBuffPos <= nrSamples);
-
-          if (TxBuffPos >= nrSamples)
+          TxBuffPos += distributed;
+          txSamples -= distributed;
+          if (TxBuffPos == nrSamples)
           {
             TxBuffPos = 0;
             NextASIO(TxBuff);
           }
-          TxSamples -= count;
-          IsoTxSamples -= count;
         }
 
-        //whole TxBuff
-
-        while (TxSamples >= nrSamples && TxBuff != AsioBuff)
+        // WinUSB always transmits the complete registered buffer. Mark the logical
+        // end of every microframe so trailing zeroes are not parsed as audio.
+        for (uint8_t c = 0; c < rxpktCount; ++c)
         {
-          DistributeSamples(spp_ptr, asioOutPtr[TxBuff], nrSamples, OUTStride);
-
-          NextASIO(TxBuff);
-          TxSamples -= nrSamples;
-          IsoTxSamples -= nrSamples;
+          uint32_t bytes = packetSamples[c] * OUTStride;
+          *((uint32_t*)(ptr + (rxpktSize * c) + bytes)) = 0xaa5555aa;
         }
-
-        //Partial TxBuff
-        if (TxSamples && TxBuff != AsioBuff)
-        {
-          uint32_t count = min(nrSamples - TxBuffPos, TxSamples);
-          TxBuffPos += DistributeSamples(spp_ptr, asioOutPtr[TxBuff] + (TxBuffPos * OUTStride), count, OUTStride);
-          TxSamples -= count;
-          IsoTxSamples -= count;
-        }
-
-        // silence samples
-        if (TxSamples && (!ClientActive || TxBuff == AsioBuff))
-        {
-          for (; spNr < rxpktCount; spNr++) {
-            uint32_t bytes = spp[spNr] * OUTStride;
-            ZeroMemory(spp_ptr[spNr], bytes);
-            IsoTxSamples -= spp[spNr];
-            //mark the end of frame
-            *((uint32_t*)(spp_ptr[spNr]+bytes)) = 0xaa5555aa;
-          }
-        }
-
-        //ASSERT(IsoTxSamples == 0);
-
-        //zero the rest of the buffer
-        //ZeroMemory(ptr, (TxReq.buff + IsoSize) - ptr);
 
         bknd_iso_write(&TxReq);
         NextXfer(mTxReqIdx);
@@ -706,8 +696,6 @@ void CypressDevice::TimerCB()
   control_xfer(mXferEp0Status);
 
 
-  //mDevStatus.OutSkipCount = hdr->OutSkipCount;
-  //mDevStatus.InFullCount = hdr->InFullCount;
   /*LOGN("lsi 0x%02x, 0x%08x\n", 0x20, (uint32_t)get_result);
   uint8_t flags = (uint8_t)get_result;
   for (uint8_t c = 0; c < 7; c++) {
@@ -722,19 +710,34 @@ void CypressDevice::TimerCB()
 
 void CypressDevice::Ep0StatusCB()
 {
-  struct _t
+  if (mXferEp0Status.stp.wIndex == 2)
   {
-    uint16_t sr;
-    uint16_t fifo;
-  } & s = *(struct _t*) mXferEp0Status.buff ;
+    struct SampleRateStatus
+    {
+      uint16_t sr;
+      uint16_t fifo;
+    } & s = *(struct SampleRateStatus*)mXferEp0Status.buff;
 
-  uint32_t SR = ConvertSampleRate( s.sr );
-  if (mDevStatus.LastSR != SR && mDevStatus.LastSR != -1 && mDevStatus.LastSR != 0)
-  {
-    devClient.SampleRateChanged();
+    uint32_t SR = ConvertSampleRate(s.sr);
+    if (mDevStatus.LastSR != SR && mDevStatus.LastSR != -1 && mDevStatus.LastSR != 0)
+      devClient.SampleRateChanged();
+
+    mDevStatus.LastSR = SR;
+    mDevStatus.FifoLevel = s.fifo;
+    mXferEp0Status.stp.wIndex = 3;
   }
-  mDevStatus.LastSR = SR;
-  mDevStatus.FifoLevel = s.fifo;
+  else
+  {
+    struct FifoErrorStatus
+    {
+      uint16_t outSkip;
+      uint16_t inFull;
+    } & s = *(struct FifoErrorStatus*)mXferEp0Status.buff;
+
+    mDevStatus.OutSkipCount = s.outSkip;
+    mDevStatus.InFullCount = s.inFull;
+    mXferEp0Status.stp.wIndex = 2;
+  }
 }
 
 //---------------------------------------------------------------------------------------------
@@ -742,6 +745,7 @@ void CypressDevice::Ep0StatusCB()
 void CypressDevice::RxIsochCB()
 {
   XferReq& RxReq = mRxRequests[mRxReqIdx];
+  uint8_t packetSamples[rxpktCount] = { 0 };
   for (uint32_t i = 0; i < rxpktCount; i++)
   {
     IsoReqResult result = bknd_iso_get_result(&RxReq, i);
@@ -749,11 +753,18 @@ void CypressDevice::RxIsochCB()
     {
       uint8_t* ptr = RxReq.buff + (i * rxpktSize);
       uint32_t len = (uint32_t)result.length;
+      if (len > rxpktSize)
+      {
+        len = rxpktSize;
+        ++mDevStatus.ResyncErrors;
+      }
+      if (len % InStride)
+      {
+        len -= len % InStride;
+        ++mDevStatus.ResyncErrors;
+      }
       uint32_t samples = len / InStride;
-      //uint16_t residual = len % InStride;
-      //ASSERT(residual == 0);
-      spp[i] = samples;
-      IsoTxSamples += samples;
+      packetSamples[i] = (uint8_t)samples;
 
       sSampleCounter += samples;
 
@@ -805,7 +816,22 @@ void CypressDevice::RxIsochCB()
         RxProgress = 0;
       }
     }
+    else if (result.status != 0)
+    {
+      ++mDevStatus.Ep6IsoErr;
+    }
   }
+
+  if (mFeedbackCount == FeedbackQueueDepth)
+  {
+    mFeedbackRead = (mFeedbackRead + 1) % FeedbackQueueDepth;
+    --mFeedbackCount;
+    ++mDevStatus.ResyncErrors;
+  }
+  memcpy(mFeedbackQueue[mFeedbackWrite], packetSamples, sizeof(packetSamples));
+  mFeedbackWrite = (mFeedbackWrite + 1) % FeedbackQueueDepth;
+  ++mFeedbackCount;
+
   //fire again
   bknd_iso_read(&RxReq);
   NextXfer(mRxReqIdx);

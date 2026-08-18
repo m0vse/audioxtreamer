@@ -61,6 +61,9 @@ bool ASIOSettingsFile::Load()
   {
     for (int c = 0; c < MaxSetting; ++c) {
       mInfo[c].val = mIni.GetLongValue(defDev, mInfo[c].key, mInfo[c].def, nullptr);
+      const int minValue = c < NrSamples ? 0 : 16;
+      if (mInfo[c].val < minValue || mInfo[c].val > mInfo[c].max)
+        mInfo[c].val = mInfo[c].def;
     }
   }
   return result == SI_OK;

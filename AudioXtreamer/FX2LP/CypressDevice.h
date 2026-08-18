@@ -25,6 +25,8 @@ public:
 
 private:
 
+  enum { IsoPacketCount = 16, FeedbackQueueDepth = 8 };
+
   void main();
   HANDLE hth_Worker;
   HANDLE mExitHandle;
@@ -87,8 +89,10 @@ private:
   //The offset(in samples) of the partial buffer we managed to transmit
   uint32_t TxBuffPos;
 
-  //throttles the output based on the input pace and if no audio is available, helps send as many silence samples
-  uint32_t IsoTxSamples;
+  uint8_t mFeedbackQueue[FeedbackQueueDepth][IsoPacketCount];
+  uint8_t mFeedbackRead;
+  uint8_t mFeedbackWrite;
+  uint8_t mFeedbackCount;
 
   bool ClientActive;
 

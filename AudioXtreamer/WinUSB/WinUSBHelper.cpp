@@ -267,8 +267,8 @@ Return value:
     return;
   }
 
-  BOOL st = CloseHandle(DeviceData->DeviceHandle);
-  st = WinUsb_Free(DeviceData->WinusbHandle);
+  BOOL st = WinUsb_Free(DeviceData->WinusbHandle);
+  st = CloseHandle(DeviceData->DeviceHandle);
   DeviceData->HandlesOpen = FALSE;
 
   return;
@@ -463,11 +463,12 @@ bool winusb_xfer_cleanup(XferReq* req)
         req->buff = nullptr;
       }
       if (ctx->pkts)
-        delete ctx->pkts;
+        delete[] ctx->pkts;
       if (ctx->results)
-        delete ctx->results;
+        delete[] ctx->results;
 
-      delete req->ctx;
+      delete ctx;
+      req->ctx = nullptr;
     }
   }
 

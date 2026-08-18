@@ -150,10 +150,14 @@ BOOL ASIOSettingsDlg::OnInitDialog()
   __super::OnInitDialog();//will call DoDataExchange
 
   //populate the controls
-  for (uint8_t c = 0; c < ASIOSettings::ChanEntires; ++c) {
+  for (uint8_t c = 0; c < ASIOSettings::InChanEntries; ++c) {
     TCHAR str[16];
     _stprintf(str, _T("%u"), (c + 1) * 2);
     mListIns.InsertString(c, str);
+  }
+  for (uint8_t c = 0; c < ASIOSettings::OutChanEntries; ++c) {
+    TCHAR str[16];
+    _stprintf(str, _T("%u"), (c + 1) * 2);
     mListOuts.InsertString(c, str);
   }
 

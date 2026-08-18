@@ -53,9 +53,9 @@ signal rx_state : rx_state_t;
 --attribute fsm_encoding : string;
 --attribute fsm_encoding of rx_state : signal is "one-hot";
 
-signal outs_counter, active_outs: natural range 0 to max_sdo_lines-1;
+signal outs_counter, active_outs: natural range 0 to max_sdo_lines;
 signal eof        : std_logic;
-signal eof_r      : slv_16;
+signal eof_candidate : std_logic;
 
 -- out_fifo signals
 
@@ -71,11 +71,15 @@ begin
   if rising_edge(usb_clk) then
     if reset = '1' or sof = '1' then
       eof <= '0';
-      eof_r <= x"0000";
+      eof_candidate <= '0';
     elsif s_axis_tvalid = '1' and eof = '0' then
-      eof_r <= s_axis_tdata;
-      if eof_r = x"55aa" and s_axis_tdata = x"aa55" then
-        eof <= '1';
+      if eof_candidate = '1' then
+        if s_axis_tdata = x"aa55" then
+          eof <= '1';
+        end if;
+        eof_candidate <= '0';
+      elsif rx_state = w0 and outs_counter = 0 and s_axis_tdata = x"55aa" then
+        eof_candidate <= '1';
       end if;
     end if;
 
