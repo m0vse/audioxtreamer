@@ -113,6 +113,7 @@ signal out_empty  : std_logic;
 --signal out_fifo_min : std_logic_vector(7 downto 0);
 signal out_fifo_skip : std_logic;
 signal out_fifo_skip_count : slv_16;
+signal out_fifo_refill_count : slv_16;
 --signal out_fifo_stats_reset : std_logic;
 
 signal in_fifo_full_count : slv_16;
@@ -167,7 +168,7 @@ constant cookie : slv_32 := to_std_logic_vector(cookie_str);
 begin
 txb_oe <= '1';
 sd_in <= ain;
-aout <= sd_out(11 downto 0);
+aout <= (others => '0') when reg_ch_params(7) = '1' else sd_out(11 downto 0);
 
 cy_bufg :  BUFG port map( I => usb_clk, O => clk48m );
 ymh_bufg : BUFG port map( I => pcm_clk, O => clkpcm );
@@ -195,10 +196,11 @@ ez_int <= '0' when midi_in_valid = 0 else '1';
 
 with lsi_rd_addr select lsi_rd_data <=
   cookie when X"00", -- the cookie
-  X"00000001" when X"01", -- the current version of the fpga
+  X"00000004" when X"01", -- the current version of the fpga
   x"00" & rd_data_count(0) & reg_sr_count when X"02",           -- sampling rate counter to detect the word clock and the out fifo level
   in_fifo_full_count & out_fifo_skip_count when X"03",  -- fifo empty /full counters
   reg_ch_params when X"04",
+  X"0000" & out_fifo_refill_count when X"06",
 
   spmf when X"08",
 
@@ -367,7 +369,7 @@ port map (
   s_axis_tvalid => out_axis_tvalid,
   s_axis_tready => out_axis_tready,
 
-  nr_outputs    => reg_ch_params(7 downto 0),
+  nr_outputs    => '0' & reg_ch_params(6 downto 0),
   out_fifo_full => rcvr_fifo_full,
   out_fifo_wr   => rcvr_wr,
   out_fifo_data => rcvr_data,
@@ -375,7 +377,11 @@ port map (
   sof           => sof
 );
 ------------------------------------------------------------------------------------------------------------
-io_reset <= '1' when  usb_reset = '1' or reg_ch_params = 0 or (lsi_wr = '1' and lsi_wr_addr = X"04") else '0';
+io_reset <= '1' when usb_reset = '1' or
+  (reg_ch_params(23 downto 8) = X"0000" and reg_ch_params(6 downto 0) = "0000000") or
+  (lsi_wr = '1' and lsi_wr_addr = X"04" and
+   (lsi_wr_data(23 downto 8) /= reg_ch_params(23 downto 8) or
+    lsi_wr_data(6 downto 0) /= reg_ch_params(6 downto 0))) else '0';
 ------------------------------------------------------------------------------------------------------------
 
 
@@ -393,7 +399,9 @@ begin
   if rising_edge(clkpcm) then
     if sd_reset = '1' then
       fill := '1';
+      full_sync := (others => '0');
       rcvr_fifo_full_sync <= '0';
+      out_fifo_refill_count <= (others => '0');
     else
       full_sync := full_sync(1 downto 0) & rcvr_fifo_full;
       rcvr_fifo_full_sync <= full_sync(2);
@@ -401,6 +409,9 @@ begin
         fill := '0';
       elsif fill = '0' and out_fifo_empty(0) = '1' then
         fill := '1';
+        if out_fifo_refill_count < X"FFFF" then
+          out_fifo_refill_count <= out_fifo_refill_count + 1;
+        end if;
       end if;
     end if;
   end if;

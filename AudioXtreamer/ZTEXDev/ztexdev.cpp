@@ -320,7 +320,14 @@ int64_t ztex_default_lsi_get1(HANDLE handle, uint8_t addr) {
   uint8_t buf[4];
   int64_t status;
   TWO_TRIES(status, control_transfer(handle, 0xc0, 0x63, 0, addr, buf, 4, 1500));
-  return status<0 ? status : buf[0] | (buf[1] << 8) | (buf[2] << 16) | (buf[3] << 24);
+  // Promote each byte to unsigned before shifting. The old expression was
+  // evaluated as a signed int, so every valid register value with bit 31 set
+  // was sign-extended and incorrectly reported to callers as a USB error.
+  const uint32_t value = static_cast<uint32_t>(buf[0]) |
+    (static_cast<uint32_t>(buf[1]) << 8) |
+    (static_cast<uint32_t>(buf[2]) << 16) |
+    (static_cast<uint32_t>(buf[3]) << 24);
+  return status < 0 ? status : static_cast<int64_t>(value);
 }
 
 // ******* ztex_default_lsi_get2 ***********************************************

@@ -6,7 +6,7 @@
     <ProductVersion>3.10</ProductVersion>
     <ProjectGuid>6e73f06c-67ed-4199-a8f0-3307426ce7bb</ProjectGuid>
     <SchemaVersion>2.0</SchemaVersion>
-    <OutputName>AudioXtreamer_v0.1</OutputName>
+    <OutputName>AudioXtreamer_v0.3.3</OutputName>
     <OutputType>Package</OutputType>
     <Name>WixInstaller</Name>
     <IncludeSearchPaths>

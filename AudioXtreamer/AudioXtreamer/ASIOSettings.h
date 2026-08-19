@@ -37,6 +37,14 @@ namespace ASIOSettings
 
   static const uint8_t InChanEntries = 12;
   static const uint8_t OutChanEntries = 9;
+
+  static const int SampleCountEntryCount = 7;
+  int SampleCountFromPosition(int position);
+  int SampleCountToPosition(int samples);
+  int NormalizeSampleCount(int samples);
+  int FifoDepthFromPosition(int position);
+  int FifoDepthToPosition(int depth);
+  int NormalizeFifoDepth(int depth);
 };
 
 #define WM_XTREAMER WM_APP + 100

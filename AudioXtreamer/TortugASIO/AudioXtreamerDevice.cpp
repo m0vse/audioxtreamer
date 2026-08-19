@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "AudioXtreamerDevice.h"
+#include "AudioXtreamer\AppLog.h"
 #include <process.h>
 
 #include "avrt.h"
@@ -43,29 +44,38 @@ inline void unhandle(HANDLE & h)
 bool
 AudioXtreamerDevice::Open()
 {
+  AppLog::Info("ASIO IPC", "Opening connection to the AudioXtreamer application");
   hMapFile = OpenFileMapping(FILE_MAP_ALL_ACCESS, FALSE, szNameShMem);
   if (hMapFile == NULL) {
+    AppLog::Error("ASIO IPC", "Shared memory is unavailable (Windows error %lu)", GetLastError());
     _tprintf(TEXT("OpenFileMapping failed (%d).\n"), GetLastError());
     goto error;
   }
 
   hWnd = FindWindow(szNameClass, szNameApp);
   if (hWnd == NULL) {
+    AppLog::Error("ASIO IPC", "AudioXtreamer application window was not found");
     _tprintf(TEXT("Xtreamer window not found (%d).\n"), GetLastError());
     goto error;
   } else {
-    if ( SendMessage(hWnd, WM_XTREAMER, 1, 0) == 0 )
+    if ( SendMessage(hWnd, WM_XTREAMER, 1, 0) == 0 ) {
+      AppLog::Error("ASIO IPC", "AudioXtreamer reports that no USB device is ready");
       goto error;
+    }
   }
 
   pStreamParams = (uint8_t*)MapViewOfFile(hMapFile, FILE_MAP_ALL_ACCESS, 0, 0, (1 << SH_MEM_BLK_SIZE_SHIFT));
   pRxBuf = (uint8_t*)MapViewOfFile(hMapFile, FILE_MAP_READ, 0, (1 << SH_MEM_BLK_SIZE_SHIFT), (1 << SH_MEM_BLK_SIZE_SHIFT));
   pTxBuf = (uint8_t*)MapViewOfFile(hMapFile, FILE_MAP_WRITE, 0, (2 << SH_MEM_BLK_SIZE_SHIFT) , 0); //till the end
 
-  if ( (pStreamParams == nullptr) || (pRxBuf == nullptr) || (pTxBuf == nullptr) )
+  if ( (pStreamParams == nullptr) || (pRxBuf == nullptr) || (pTxBuf == nullptr) ) {
+    AppLog::Error("ASIO IPC", "Could not map the shared audio buffers (Windows error %lu)", GetLastError());
     _tprintf(TEXT("Could not map view of file (%d).\n"), GetLastError());
-  else
+  }
+  else {
+    AppLog::Info("ASIO IPC", "Connection to AudioXtreamer established");
     return true;
+  }
 
 error:
 
@@ -96,8 +106,10 @@ AudioXtreamerDevice::Start()
   hAsioEvent = OpenEvent(SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE, szNameAsioEvent);
   hExtreamerEvent = OpenEvent(SYNCHRONIZE, FALSE, szNameXtreamerEvent);
 
-  if (hAsioEvent == NULL || hExtreamerEvent == NULL || SendMessage(hWnd, WM_XTREAMER, 2, 0) == 0)
+  if (hAsioEvent == NULL || hExtreamerEvent == NULL || SendMessage(hWnd, WM_XTREAMER, 2, 0) == 0) {
+    AppLog::Error("ASIO IPC", "Could not start streaming; IPC events or USB engine are unavailable");
     return false;
+  }
 
 
   if (hth_Worker != INVALID_HANDLE_VALUE) {
@@ -110,8 +122,10 @@ AudioXtreamerDevice::Start()
   hth_Worker = (HANDLE)_beginthread(StaticWorkerThread, 0, this);
   if (hth_Worker != INVALID_HANDLE_VALUE) {
     ::SetThreadPriority(hth_Worker, THREAD_PRIORITY_TIME_CRITICAL);
+    AppLog::Info("ASIO IPC", "ASIO bridge worker started");
     return true;
   }
+  AppLog::Error("ASIO IPC", "Could not create the ASIO bridge worker");
   return false;
 }
 
@@ -125,6 +139,7 @@ AudioXtreamerDevice::Stop(bool wait)
     BOOL result = SetEvent(mExitHandle);
     if (result == 0) {
       LOGN("AudioXtreamerDevice::Stop SetEvent HANDLE:%p Error %u\n", mExitHandle, GetLastError() );
+      AppLog::Error("ASIO IPC", "Could not signal the ASIO bridge to stop (Windows error %lu)", GetLastError());
       wait = false;
     }
 
@@ -133,6 +148,7 @@ AudioXtreamerDevice::Stop(bool wait)
       hth_Worker = INVALID_HANDLE_VALUE;
     }
 
+    AppLog::Info("ASIO IPC", "ASIO bridge stop requested%s", wait ? " and completed" : "");
     return true;
   }
   else
@@ -152,6 +168,7 @@ AudioXtreamerDevice::Close()
   unhandle(hAsioEvent);
   unhandle(hExtreamerEvent);
   unhandle(hMapFile);
+  AppLog::Info("ASIO IPC", "Connection to AudioXtreamer closed");
   return true;
 }
 
@@ -223,6 +240,7 @@ AudioXtreamerDevice::main()
     case WAIT_ABANDONED:
 
     case WAIT_FAILED:
+      AppLog::Error("ASIO IPC", "ASIO bridge wait failed (Windows error %lu)", GetLastError());
       error = true;
       break;
     }
@@ -242,6 +260,8 @@ AudioXtreamerDevice::main()
   mExitHandle = INVALID_HANDLE_VALUE;
 
   devClient.DeviceStopped(error);
+
+  AppLog::Info("ASIO IPC", "ASIO bridge worker exited%s", error ? " after an error" : " normally");
 
   LOG0("AudioXtreamerDevice::main Exit");
 }

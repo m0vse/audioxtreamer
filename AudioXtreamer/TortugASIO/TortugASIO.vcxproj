@@ -79,21 +79,21 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <LinkIncremental>true</LinkIncremental>
-    <IncludePath>.;..;..\..\asiosdk2.3\common;..\..\libs;$(IncludePath)</IncludePath>
+    <IncludePath>.;COMBase;..;..\..\asiosdk2.3.4\common;..\..\libs;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <LinkIncremental>true</LinkIncremental>
-    <IncludePath>.;..;..\..\asiosdk2.3\common;..\..\libs;$(IncludePath)</IncludePath>
+    <IncludePath>.;COMBase;..;..\..\asiosdk2.3.4\common;..\..\libs;$(IncludePath)</IncludePath>
     <TargetName>$(ProjectName)x64</TargetName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <LinkIncremental>false</LinkIncremental>
-    <IncludePath>.;..;..\..\asiosdk2.3\common;..\..\libs;$(IncludePath)</IncludePath>
+    <IncludePath>.;COMBase;..;..\..\asiosdk2.3.4\common;..\..\libs;$(IncludePath)</IncludePath>
     <OutDir>$(ProjectDir)$(Configuration)\</OutDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <LinkIncremental>false</LinkIncremental>
-    <IncludePath>.;..;..\..\asiosdk2.3\common;..\..\libs;$(IncludePath)</IncludePath>
+    <IncludePath>.;COMBase;..;..\..\asiosdk2.3.4\common;..\..\libs;$(IncludePath)</IncludePath>
     <TargetName>$(ProjectName)x64</TargetName>
     <OutDir>$(ProjectDir)$(Platform)\$(Configuration)\</OutDir>
   </PropertyGroup>
@@ -169,12 +169,13 @@
     <Text Include="ReadMe.txt" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\..\ASIOSDK2.3\common\asio.h" />
-    <ClInclude Include="..\..\ASIOSDK2.3\common\asiosys.h" />
-    <ClInclude Include="..\..\ASIOSDK2.3\common\iasiodrv.h" />
+    <ClInclude Include="..\..\asiosdk2.3.4\common\asio.h" />
+    <ClInclude Include="..\..\asiosdk2.3.4\common\asiosys.h" />
+    <ClInclude Include="..\..\asiosdk2.3.4\common\iasiodrv.h" />
     <ClInclude Include="..\UsbDev\UsbDev.h" />
     <ClInclude Include="..\AudioXtreamer\ASIOSettings.h" />
     <ClInclude Include="..\AudioXtreamer\ASIOSettingsFile.h" />
+    <ClInclude Include="..\AudioXtreamer\AppLog.h" />
     <ClInclude Include="AudioXtreamerDevice.h" />
     <ClInclude Include="COMBase\combase.h" />
     <ClInclude Include="resource.h" />
@@ -186,6 +187,7 @@
     <ClCompile Include="..\UsbDev\UsbDev.cpp" />
     <ClCompile Include="..\AudioXtreamer\ASIOSettings.cpp" />
     <ClCompile Include="..\AudioXtreamer\ASIOSettingsFile.cpp" />
+    <ClCompile Include="..\AudioXtreamer\AppLog.cpp" />
     <ClCompile Include="AudioXtreamerDevice.cpp" />
     <ClCompile Include="COMBase\combase.cpp" />
     <ClCompile Include="COMBase\dllentry.cpp" />

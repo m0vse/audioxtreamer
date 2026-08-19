@@ -2,6 +2,7 @@
 //
 
 #include "stdafx.h"
+#include "AudioXtreamer\AppLog.h"
 
 /*
 Steinberg Audio Stream I/O API
@@ -200,6 +201,8 @@ void TortugASIO::FreeBuffers(uint8_t*&rxBuff, uint8_t*&txBuff)
 
 void TortugASIO::DeviceStopped(bool error)
 {//called from the device's thread context
+  if (error)
+    AppLog::Error("ASIO", "Streaming stopped because the AudioXtreamer bridge reported an error");
   if (error && callbacks && callbacks->asioMessage)
     callbacks->asioMessage(kAsioResetRequest, 0, 0, 0);
 }
@@ -214,6 +217,7 @@ TortugASIO::TortugASIO(LPUNKNOWN pUnk, HRESULT *phr)
 : CUnknown(ifaceName, pUnk, phr)
 {
   LOG0("TortugASIO::TortugASIO");
+  AppLog::Info("ASIO", "Driver instance created (%s)", sizeof(void*) == 8 ? "64-bit" : "32-bit");
 
   // typically blockFrames * 2; try to get 1 by offering direct buffer
   // access, and using asioPostOutput for lower latency
@@ -246,6 +250,7 @@ TortugASIO::TortugASIO(LPUNKNOWN pUnk, HRESULT *phr)
 TortugASIO::~TortugASIO()
 {
   LOG0("TortugASIO::~TortugASIO");
+  AppLog::Info("ASIO", "Driver instance is being released");
 
   if(started)
     stop();
@@ -287,6 +292,7 @@ void TortugASIO::getErrorMessage(char *string)
 ASIOBool TortugASIO::init(void* sysRef)
 {
   LOG0("TortugASIO::init");
+  AppLog::Info("ASIO", "Host requested driver initialisation");
   bufferActive = false;
 
   if (active)
@@ -304,6 +310,8 @@ ASIOBool TortugASIO::init(void* sysRef)
     mNumOutputs = (s.NrOuts + 1) * 2;
     blockFrames = mNumSamples = s.NrSamples;
     active = true;
+    AppLog::Info("ASIO", "Driver initialised: inputs=%ld outputs=%ld buffer=%ld samples",
+      mNumInputs, mNumOutputs, blockFrames);
     return true;
   }
 
@@ -311,6 +319,8 @@ ASIOBool TortugASIO::init(void* sysRef)
     delete mDevice;
 
   mDevice = nullptr;
+
+  AppLog::Error("ASIO", "Driver initialisation failed");
 
   return false;
 }
@@ -329,9 +339,11 @@ ASIOError TortugASIO::start()
     if (mDevice->Start())
     {
       started = true;
+      AppLog::Info("ASIO", "Host started audio processing");
       return ASE_OK;
     }
   }
+  AppLog::Error("ASIO", "Host start request failed because the device is unavailable");
   return ASE_NotPresent;
 }
 
@@ -341,8 +353,10 @@ ASIOError TortugASIO::stop()
   LOG0("TortugASIO::stop");
   if (mDevice && mDevice->Stop(false)) {
     started = false;
+    AppLog::Info("ASIO", "Host stopped audio processing");
     return ASE_OK;
   }
+  AppLog::Warning("ASIO", "Host stop request could not be completed normally");
   return ASE_HWMalfunction;
 }
 
@@ -401,9 +415,12 @@ ASIOError TortugASIO::getSampleRate(ASIOSampleRate *sampleRate)
 ASIOError TortugASIO::setSampleRate(ASIOSampleRate sampleRate)
 {
   LOG0("TortugASIO::setSampleRate");
-  if (mDevice == nullptr || sampleRate != (ASIOSampleRate)mDevice->GetSampleRate())
+  if (mDevice == nullptr || sampleRate != (ASIOSampleRate)mDevice->GetSampleRate()) {
+    AppLog::Warning("ASIO", "Host requested unavailable sample rate %.0f Hz", sampleRate);
     return ASE_NoClock;
+  }
 
+  AppLog::Info("ASIO", "Host selected sample rate %.0f Hz", sampleRate);
   return ASE_OK;
 }
 
@@ -540,6 +557,8 @@ ASIOError TortugASIO::createBuffers(ASIOBufferInfo *bufferInfos, long numChannel
 
   this->callbacks = callbacks;
   bufferActive = true;
+  AppLog::Info("ASIO", "Host created buffers: requested channels=%ld active inputs=%ld active outputs=%ld frames=%ld",
+    numChannels, activeInputs, activeOutputs, blockFrames);
   if (callbacks->asioMessage != NULL) {
     if (callbacks->asioMessage(kAsioSupportsTimeInfo, 0, 0, 0))
     {
@@ -568,6 +587,7 @@ ASIOError TortugASIO::disposeBuffers()
 
   if (bufferActive)
   {
+    AppLog::Info("ASIO", "Host disposed audio buffers");
     EnterCriticalSection(&cs);
       delete[] OutputBuffers[0];
       delete[] OutputBuffers;
@@ -594,6 +614,7 @@ ASIOError TortugASIO::disposeBuffers()
 //---------------------------------------------------------------------------------------------
 ASIOError TortugASIO::controlPanel()
 {
+  AppLog::Info("ASIO", "Host opened the AudioXtreamer control panel");
   //send message to AudioXtreamer and wait for the completion of the dialog
   if ( mDevice != nullptr && mDevice->ConfigureDevice())
   {
@@ -604,6 +625,8 @@ ASIOError TortugASIO::controlPanel()
 
     if (callbacks && callbacks->asioMessage)
       callbacks->asioMessage(kAsioResetRequest, 0, 0, 0);
+
+    AppLog::Info("ASIO", "Control-panel settings accepted; host reset requested");
   }
 
   return ASE_OK;

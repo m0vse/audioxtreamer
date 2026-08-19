@@ -4,7 +4,7 @@
     Id="*"
     Name="AudioXtreamer"
     Language="1033"
-    Version="0.1.0.0"
+    Version="0.3.3.0"
     Manufacturer="TurtleDesign"
     UpgradeCode="0c53acf8-2a44-40e1-957f-a805936b567a">
     <Package
@@ -20,11 +20,12 @@
         <Directory Id="INSTALLDIR32" Name="AudioXtreamer">
           <Component Id='HelperLibrary' Guid="*" Win64="no">
             <File Id='AsioDLLx86' Name='TortugASIO.dll' DiskId='1' Source='..\TortugASIO\Release\TortugASIO.dll' KeyPath='yes' />
-            <RegistryValue Root="HKCR" Key="Wow6432Node\CLSID\{25CBA31C-951A-48C6-B513-012E1E2D09D8}" Value="TortugASIO x86" Type="string" Action="write" />
-            <RegistryValue Root="HKCR" Key="Wow6432Node\CLSID\{25CBA31C-951A-48C6-B513-012E1E2D09D8}\InprocServer32" Value="[INSTALLDIR32]TortugASIO.dll" Type="string" Action="write" />
-            <RegistryValue Root="HKCR" Key="Wow6432Node\CLSID\{25CBA31C-951A-48C6-B513-012E1E2D09D8}\InprocServer32" Name="ThreadingModel" Value="Apartment" Type="string" Action="write" />
-            <RegistryValue Root="HKLM" Key="Software\WOW6432Node\ASIO\TortugASIO AudioXtreamer" Name="CLSID" Value="{25CBA31C-951A-48C6-B513-012E1E2D09D8}" Type="string" Action="write" />
-            <RegistryValue Root="HKLM" Key="Software\WOW6432Node\ASIO\TortugASIO AudioXtreamer" Name="Description" Value="TortugASIO x86" Type="string" Action="write" />
+            <!-- Win64="no" selects the 32-bit registry view; do not hard-code WOW6432Node. -->
+            <RegistryValue Root="HKCR" Key="CLSID\{25CBA31C-951A-48C6-B513-012E1E2D09D8}" Value="TortugASIO x86" Type="string" Action="write" />
+            <RegistryValue Root="HKCR" Key="CLSID\{25CBA31C-951A-48C6-B513-012E1E2D09D8}\InprocServer32" Value="[INSTALLDIR32]TortugASIO.dll" Type="string" Action="write" />
+            <RegistryValue Root="HKCR" Key="CLSID\{25CBA31C-951A-48C6-B513-012E1E2D09D8}\InprocServer32" Name="ThreadingModel" Value="Apartment" Type="string" Action="write" />
+            <RegistryValue Root="HKLM" Key="Software\ASIO\TortugASIO AudioXtreamer" Name="CLSID" Value="{25CBA31C-951A-48C6-B513-012E1E2D09D8}" Type="string" Action="write" />
+            <RegistryValue Root="HKLM" Key="Software\ASIO\TortugASIO AudioXtreamer" Name="Description" Value="TortugASIO x86" Type="string" Action="write" />
           </Component>
         </Directory>
       </Directory>

@@ -4,6 +4,7 @@
 #include "resource.h"
 #include "AudioXtreamer.h"
 #include "PropertySheetDlg.h"
+#include "AppLog.h"
 
 
 // CAboutDlg dialog used for App About
@@ -31,6 +32,7 @@ MainFrame::MainFrame(UsbDevice & dev)
 , mDevice(dev)
 , mPropertySheet(mDevice, this)
 , mState(stClosed)
+, mWaitingForDeviceLogged(false)
 {
   WNDCLASSEX wndc;
   ZeroMemory(&wndc, sizeof(wndc));
@@ -42,6 +44,11 @@ MainFrame::MainFrame(UsbDevice & dev)
 
   mIniFile.Load();
   theApp.UpdateStreamParams();
+  AppLog::Info("App", "Settings loaded: inputs=%u outputs=%u buffer=%u FIFO=%u",
+    (theSettings[ASIOSettings::NrIns].val + 1) * 2,
+    (theSettings[ASIOSettings::NrOuts].val + 1) * 2,
+    theSettings[ASIOSettings::NrSamples].val,
+    theSettings[ASIOSettings::FifoDepth].val);
 }
 
 
@@ -74,6 +81,7 @@ int MainFrame::OnCreate(LPCREATESTRUCT lpCreateStruct)
   SetIconState(icstStopped);
 
   SetTimer(100, 100, NULL);
+  AppLog::Info("App", "AudioXtreamer started; waiting for the USB device");
 
   return 1;
 }
@@ -131,8 +139,15 @@ void MainFrame::NextState(enum State newState)
   {
   case stClosed:
     theApp.UpdateStreamParams();
-    if (mDevice.Open())
+    if (mDevice.Open()) {
       mState = stOpen;
+      mWaitingForDeviceLogged = false;
+      AppLog::Info("Device", "USB device opened and FPGA configured");
+    }
+    else if (!mWaitingForDeviceLogged) {
+      mWaitingForDeviceLogged = true;
+      AppLog::Info("Device", "USB device is not available; connection attempts will continue");
+    }
     break;
 
   case stOpen:
@@ -141,8 +156,10 @@ void MainFrame::NextState(enum State newState)
     if (mDevice.Start()) {
       mState = stReady;
       SetIconState(icstStarted);
+      AppLog::Info("Stream", "USB audio engine started");
     }
     else {
+      AppLog::Warning("Stream", "USB audio engine failed to start; reopening the device");
       mDevice.Close();
       mState = stClosed;
       break;
@@ -153,11 +170,13 @@ void MainFrame::NextState(enum State newState)
       if (theApp.IsClientActive()) {
         SetIconState(icstActive);
         mState = stActive;
+        AppLog::Info("ASIO", "ASIO client became active");
       }
     }
     else {
       SetIconState(icstStopped);
       mState = stOpen;
+      AppLog::Warning("Stream", "USB audio engine stopped unexpectedly");
     }
     break;
 
@@ -166,11 +185,13 @@ void MainFrame::NextState(enum State newState)
       if (!theApp.IsClientActive()) {
         SetIconState(icstStarted);
         mState = stReady;
+        AppLog::Info("ASIO", "ASIO client became inactive");
       }
     }
     else {
       SetIconState(icstStopped);
       mState = stOpen;
+      AppLog::Warning("Stream", "USB audio engine stopped while an ASIO client was active");
     }
     break;
   default: break;
@@ -188,11 +209,13 @@ INT_PTR MainFrame::OpenControlPanel(bool pause)
   }
 
   bool restart = false;
+  AppLog::Info("UI", "Control panel opened%s", pause ? " by ASIO host" : "");
   if (pause && mDevice.IsRunning())
   {
     KillTimer(100);
     mDevice.Stop(true);
     restart = true;
+    AppLog::Info("Stream", "USB audio engine paused for control-panel changes");
   }
 
   INT_PTR result = mPropertySheet.DoModal();
@@ -203,7 +226,10 @@ INT_PTR MainFrame::OpenControlPanel(bool pause)
 
   if (restart)
   {
-    mDevice.Start();
+    if (mDevice.Start())
+      AppLog::Info("Stream", "USB audio engine resumed after control-panel changes");
+    else
+      AppLog::Error("Stream", "USB audio engine did not resume after control-panel changes");
     SetTimer(100, 100, NULL);
   }
 
@@ -213,13 +239,18 @@ INT_PTR MainFrame::OpenControlPanel(bool pause)
 void MainFrame::SaveSettings()
 {
   mIniFile.Save();
+  AppLog::Info("App", "Settings saved: inputs=%u outputs=%u buffer=%u FIFO=%u",
+    (theSettings[ASIOSettings::NrIns].val + 1) * 2,
+    (theSettings[ASIOSettings::NrOuts].val + 1) * 2,
+    theSettings[ASIOSettings::NrSamples].val,
+    theSettings[ASIOSettings::FifoDepth].val);
 }
 
 
 
 void MainFrame::OnAudioxtreamerQuit()
 {
-  //OnAudioxtreamerStop();
+  AppLog::Info("App", "Exit requested");
   PostQuitMessage(0);
 }
 

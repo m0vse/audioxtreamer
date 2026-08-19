@@ -34,6 +34,7 @@ public:
 protected:
 
   HANDLE hMapFile;
+  HANDLE hInstanceMutex;
   uint8_t* pBuf;
   HANDLE hAsioEvent;
   HANDLE hXtreamerEvent;

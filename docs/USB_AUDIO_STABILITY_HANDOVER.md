@@ -1,6 +1,6 @@
 # AudioXtreamer USB Audio Stability Handover
 
-Date: 2026-08-18
+Date: 2026-08-19
 
 ## Purpose and status
 
@@ -8,10 +8,18 @@ This handover records the source-level investigation into unstable/glitchy USB
 audio, the fixes made in this change set, the limits of what has been proven,
 and the Windows/FPGA validation work still required.
 
-The changes have been reviewed statically and the host packet-distribution
-algorithm has been exercised with a portable model. They have **not** yet been
-compiled with Visual Studio, synthesized with Xilinx ISE, or run on the Yamaha
-01X hardware. Hardware validation on Windows is the next required step.
+The Windows application and ASIO driver have been built with Visual Studio
+2022, the Spartan-6 image has been synthesized and implemented with Xilinx ISE
+14.7, and the combined system has produced multichannel audio through a ZTEX
+2.01 and Yamaha 01X. The timing-clean ISE build used placer cost table 2 and
+reported timing score 0 with all constraints met.
+
+This is an **experimental milestone, not a stable audio release**. At 44.1 kHz,
+18 output channels, and a 64-sample FPGA FIFO, playback can run for useful
+periods but intermittent audible glitches and transport anomalies remain. A
+512-sample ASIO block is the repeatable baseline; 1024 samples has produced
+fewer glitches so far, but neither is proven glitch-free. Testing so far used a
+Dell USB-C dock; a direct USB connection is the next controlled comparison.
 
 ## Critical channel-count clarification
 
@@ -256,6 +264,68 @@ isochronous packet descriptors also increment `Ep6IsoErr`. See
 [`CypressDevice.cpp`](../AudioXtreamer/FX2LP/CypressDevice.cpp#L685), lines
 685-741 and 745-833.
 
+### 10. Muted stream reconfiguration and explicit underrun diagnostics
+
+FPGA interface version 4 uses bit 7 of readable configuration register 4 to
+hard-mute the physical serial audio outputs by forcing them low. The host uses
+read-modify-write and verifies the bit after every mute or unmute command.
+Changing only bit 7 does not reset the audio FIFOs; changes to the output count
+in bits 6:0, input count, or FIFO threshold still do. Seven output-count bits
+support up to 127 channels, well above this design's physical output count.
+Register 6 counts output FIFO empty/refill cycles, which the older
+`Skip` counter did not observe because the refill state deliberately suppresses
+empty reads.
+
+The Windows host applies a 256-sample software gain ramp. On shutdown or a
+settings change it fades to zero, allows queued zero-gain samples to drain,
+then asks the USB worker thread to assert the FPGA hard mute. On startup it
+initialises the USB FIFOs and channel configuration while muted, then performs
+and verifies unmute before submitting isochronous transfers. The XLabs firmware
+requires vendor request `0x70` before each LSI register change, and that request
+also resets the FX2 FIFOs. Issuing it during live transfers corrupted framing;
+placing the required unmute before transfer submission avoids that failure.
+The host then fades up when the ASIO client connects. A configured FPGA image
+with the `TRTG` cookie and interface version 4 is reused; only an absent or
+incompatible image is downloaded. Failed identity checks are rate-limited so a
+bad image cannot cause a rapid reprogramming loop.
+
+The earlier interface-version-2 experiment used a write-only bit in register 5.
+Hardware A/B testing showed normal PCM reaching USB while the 01X remained
+silent, and audio returned immediately when the known-good version-1 FPGA was
+loaded. A version-3 experiment then exposed that the legacy LSI implementation
+does not retain register 4's upper byte; a requested bit-31 mute read back as
+zero. Version 4 therefore places mute in unused low-byte bit 7 on the existing
+readable, already-proven register-4 path and refuses to report success without
+readback. The LSI host reader was also corrected to assemble 32-bit values as
+unsigned data so valid values with bit 31 set cannot be mistaken for errors.
+
+Hardware A/B testing also exposed an existing FPGA-loader boundary bug. A
+465,856-byte generated image plus the loader's 512-byte prefix is exactly
+divisible by the 64-byte USB packet size. Without a short final packet, the FX2
+reported FPGA `DONE` but the LSI interface remained inactive and host reads
+returned `0x4D4D4D4D`. The loader now appends one zero clock byte only when the
+prefixed transfer would otherwise end on a 64-byte boundary. The same FPGA
+image then configured correctly, proving the VHDL was not the cause.
+
+Runtime observations on 18-19 August 2026 show a separate transport issue. Events
+included USB capture errors, a received-sample count of 44,088 for a 44.1 kHz
+hardware clock, and output FIFO excursions from near empty to the 64-sample
+refill threshold or near full. This strongly indicates that lost USB IN
+microframes remove timing feedback used by USB OUT, causing the output FIFO to
+enter its pause/refill recovery. The received-sample count is not itself a
+measurement of PCM-clock drift; 44,101 can result from the one-second timer and
+USB completion boundary, while a packet-sized downward excursion is evidence
+of missing host-received samples. The settings-change mute sequence prevents
+configuration transitions, but it cannot conceal continuing runtime underruns
+without replacing clicks with dropouts. Applying an arbitrary 350-sample ASIO
+block produced a pronounced audio defect; returning to 512 restored normal
+playback, although occasional glitches remained. A subsequent 1024-sample test
+produced fewer glitches than 512, further implicating host/USB scheduling and
+buffer headroom. The UI now offers only
+power-of-two ASIO block sizes (16-1024), and the FPGA FIFO control advances only
+in its required 16-sample steps (16-240). Unsupported saved block sizes round
+up, so an old value of 350 becomes 512 rather than reducing timing headroom.
+
 ## USB packet and PCM format
 
 - USB high-speed microframe payload capacity is fixed at 1024 bytes in the host
@@ -334,8 +404,10 @@ These items are not fixed by this change set:
 9. **FX2 firmware absent.** The repository contains host calls and FPGA logic but
    not the Cypress FX2 firmware/USB descriptors. Endpoint setup, alternate
    settings, and SOF behavior cannot be audited end-to-end from this repository.
-10. **No platform build in this pass.** macOS lacks the Windows SDK/Visual Studio
-    and Xilinx ISE toolchain, so C++ compilation and FPGA synthesis remain open.
+10. **Glitch-free operation is not proven.** Windows/ISE builds and real 01X
+    playback now work, but ongoing refill/capture/resync counters and audible
+    glitches fail the final stability criteria. Direct-USB testing, longer runs,
+    and transport-control work remain necessary.
 
 ## Windows checkout and prerequisites
 
@@ -368,10 +440,12 @@ Visual Studio:
 
 External source/tool dependencies:
 
-- **Steinberg ASIO SDK 2.3** is required to compile `TortugASIO`. It is not in
-  this repository. Place it at repository-root `asiosdk2.3/` so that
-  `asiosdk2.3/common/asiosys.h` and `asiosdk2.3/common/iasiodrv.h` exist, matching
-  the include path in `TortugASIO.vcxproj`. Observe Steinberg's SDK licence.
+- **Steinberg ASIO SDK 2.3.4** is required to compile `TortugASIO`. It is not in
+  this repository. Place it at repository-root `asiosdk2.3.4/` so that
+  `asiosdk2.3.4/common/asiosys.h` and
+  `asiosdk2.3.4/common/iasiodrv.h` exist, matching the include path in
+  `TortugASIO.vcxproj`. The SDK's dual-licence terms apply; the SDK payload is
+  intentionally excluded from this repository.
 - **WiX Toolset v3.11 or newer in the v3 line** is required only for the MSI
   project. Install the WiX v3 build tools and the Visual Studio extension if the
   installer project must load inside the IDE. The checked-in `.wixproj` imports
@@ -408,14 +482,18 @@ Device/runtime prerequisites:
 ### FPGA build
 
 - Open `FPGA/ZTEX201/USB32chAudio/USB32chAudio.xise` in Xilinx ISE 14.7.
+- If ISE reports missing AXI UARTLite, `proc_common`, or generated FIFO sources,
+  run `./setup_ise14_sources.sh` inside the ISE Linux VM before reopening the
+  project. The script copies the locally installed Xilinx sources and invokes
+  Core Generator; those vendor/generated files are intentionally not committed.
 - Target device is Spartan-6 `xc6slx16-ftg256-2`.
 - Run synthesis, implementation, and Generate Programming File.
 - The project property `Create Binary Configuration File` is enabled and output
   name is `top_audioxtreamer`, so the expected result is
   `FPGA/ZTEX201/USB32chAudio/top_audioxtreamer.bin`.
 
-**Build-order warning:** `top_audioxtreamer.bin` is generated and is currently
-absent from the repository. The Windows resource script embeds it as
+**Build-order warning:** `top_audioxtreamer.bin` is a generated file and may be
+stale after VHDL changes. The Windows resource script embeds it as
 `IDR_FPGA_BIN`; see
 [`AudioXtreamer.rc`](../AudioXtreamer/AudioXtreamer/AudioXtreamer.rc#L274) and
 [`AudioXtreamer.vcxproj`](../AudioXtreamer/AudioXtreamer/AudioXtreamer.vcxproj#L252).
@@ -437,7 +515,7 @@ and all counters for each run.
 ### Phase A: basic operation
 
 1. Build the new FPGA binary, then build/install the matching Windows software.
-2. Start at 48 kHz, 24 ASIO inputs / 18 ASIO outputs, 256-sample ASIO blocks,
+2. Start at 44.1 kHz, 24 ASIO inputs / 18 ASIO outputs, 512-sample ASIO blocks,
    FIFO 64.
 3. Confirm hardware sample rate and software sample rate agree.
 4. Confirm all 24 input and 18 output channels are unique and in the expected
@@ -475,8 +553,8 @@ Pass criteria after startup:
 
 ## Recommended next engineering steps
 
-1. Complete the Windows/ISE build and the validation matrix above before making
-   further architectural changes.
+1. Compare the current 512/64 configuration through a direct USB connection
+   against the Dell USB-C dock, then run the remaining validation matrix.
 2. Measure and document the exact 88.2/96 kHz physical slot mapping, then enforce
    24-in/18-out at base rates and 16-in/10-out at double rates in one shared
    host-perspective policy.
@@ -494,17 +572,19 @@ Pass criteria after startup:
 
 ## Files changed in this stability pass
 
-- `AudioXtreamer/AudioXtreamer/ASIOSettings.cpp`
-- `AudioXtreamer/AudioXtreamer/ASIOSettings.h`
-- `AudioXtreamer/AudioXtreamer/ASIOSettingsFile.cpp`
-- `AudioXtreamer/AudioXtreamer/SettingsDlg.cpp`
-- `AudioXtreamer/FX2LP/CypressDevice.cpp`
-- `AudioXtreamer/FX2LP/CypressDevice.h`
-- `AudioXtreamer/TortugASIO/TortugASIO.cpp`
-- `AudioXtreamer/WinUSB/WinUSBHelper.cpp`
-- `VHDL/usb2iis/isoch_audio_in.vhd`
-- `VHDL/usb2iis/isoch_audio_out.vhd`
-- `docs/USB_AUDIO_STABILITY_HANDOVER.md`
-- `docs/Yamaha-01X-Service-Manual.pdf` (source material supplied for this review)
+- Windows application and UI: persistent logging, device/stream/client status,
+  single-instance handling, validated settings, version resources, and project
+  wiring under `AudioXtreamer/AudioXtreamer/`.
+- USB and FPGA control: stream transport, mute/readback, loader, and diagnostics
+  under `AudioXtreamer/FX2LP/`, `AudioXtreamer/ZTEXDev/`, and shared device code.
+- ASIO driver: IPC lifecycle, logging, buffer handling, SDK 2.3.4 project paths,
+  and version resources under `AudioXtreamer/TortugASIO/`.
+- FPGA: interface-v4 mute/counters, output behavior, timing constraints, and ISE
+  project settings under `VHDL/usb2iis/` and
+  `FPGA/ZTEX201/USB32chAudio/`.
+- Build/reproduction material: installer version 0.3.3, `.gitignore`,
+  `setup_ise14_sources.sh`, this handover, and the top-level README.
 
-No PCB files, FX2 firmware, or Yamaha PCM channel mapping were changed.
+Generated Windows/ISE output, FPGA bitstreams, copied Xilinx sources, and ASIO
+SDK payloads are deliberately excluded. No PCB files, FX2 firmware, or Yamaha
+PCM channel mapping were changed.

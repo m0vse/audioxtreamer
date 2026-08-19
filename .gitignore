@@ -1,0 +1,67 @@
+# Visual Studio and MSBuild output
+.vs/
+**/Debug/
+**/Release/
+**/x64/
+**/Win32/
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
+
+# WiX output
+AudioXtreamer/Installer/bin/
+AudioXtreamer/Installer/obj/
+
+# ASIO SDKs are supplied locally under their own licence.
+asiosdk*/
+
+# Xilinx sources copied from the local ISE installation.
+VHDL/axi_uartlite_v1_02_a/
+VHDL/proc_common_v3_00_a/
+
+# Xilinx ISE/Core Generator output. Keep the checked-in project, constraints,
+# and .xco configuration; generated implementation and IP products stay local.
+FPGA/ZTEX201/USB32chAudio/*.gise
+FPGA/ZTEX201/USB32chAudio/_ngo/
+FPGA/ZTEX201/USB32chAudio/_xmsgs/
+FPGA/ZTEX201/USB32chAudio/iseconfig/
+FPGA/ZTEX201/USB32chAudio/xlnx_auto_0_xdb/
+FPGA/ZTEX201/USB32chAudio/xst/
+FPGA/ZTEX201/USB32chAudio/ipcore_dir/*
+!FPGA/ZTEX201/USB32chAudio/ipcore_dir/*.xco
+!FPGA/ZTEX201/USB32chAudio/ipcore_dir/coregen.cgp
+FPGA/ZTEX201/USB32chAudio/*.bgn
+FPGA/ZTEX201/USB32chAudio/*.bin
+FPGA/ZTEX201/USB32chAudio/*.bit
+FPGA/ZTEX201/USB32chAudio/*.bld
+FPGA/ZTEX201/USB32chAudio/*.cmd_log
+FPGA/ZTEX201/USB32chAudio/*.drc
+FPGA/ZTEX201/USB32chAudio/*.html
+FPGA/ZTEX201/USB32chAudio/*.log
+FPGA/ZTEX201/USB32chAudio/*.lso
+FPGA/ZTEX201/USB32chAudio/*.map
+FPGA/ZTEX201/USB32chAudio/*.mrp
+FPGA/ZTEX201/USB32chAudio/*.ncd
+FPGA/ZTEX201/USB32chAudio/*.ngc
+FPGA/ZTEX201/USB32chAudio/*.ngd
+FPGA/ZTEX201/USB32chAudio/*.ngm
+FPGA/ZTEX201/USB32chAudio/*.ngr
+FPGA/ZTEX201/USB32chAudio/*.pad
+FPGA/ZTEX201/USB32chAudio/*_pad.csv
+FPGA/ZTEX201/USB32chAudio/*_pad.txt
+FPGA/ZTEX201/USB32chAudio/*.par
+FPGA/ZTEX201/USB32chAudio/*.pcf
+FPGA/ZTEX201/USB32chAudio/*.prj
+FPGA/ZTEX201/USB32chAudio/*.ptwx
+FPGA/ZTEX201/USB32chAudio/*.stx
+FPGA/ZTEX201/USB32chAudio/*.syr
+FPGA/ZTEX201/USB32chAudio/*.twr
+FPGA/ZTEX201/USB32chAudio/*.twx
+FPGA/ZTEX201/USB32chAudio/*.unroutes
+FPGA/ZTEX201/USB32chAudio/*.ut
+FPGA/ZTEX201/USB32chAudio/*.xml
+FPGA/ZTEX201/USB32chAudio/*.xpi
+FPGA/ZTEX201/USB32chAudio/*.xrpt
+FPGA/ZTEX201/USB32chAudio/*.xst
+FPGA/ZTEX201/USB32chAudio/*.xwbt

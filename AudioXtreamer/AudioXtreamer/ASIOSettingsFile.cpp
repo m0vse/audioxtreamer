@@ -65,6 +65,8 @@ bool ASIOSettingsFile::Load()
       if (mInfo[c].val < minValue || mInfo[c].val > mInfo[c].max)
         mInfo[c].val = mInfo[c].def;
     }
+    mInfo[NrSamples].val = NormalizeSampleCount(mInfo[NrSamples].val);
+    mInfo[FifoDepth].val = NormalizeFifoDepth(mInfo[FifoDepth].val);
   }
   return result == SI_OK;
 }

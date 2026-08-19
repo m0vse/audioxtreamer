@@ -4,6 +4,7 @@
 
 #include "stdafx.h"
 #include "AudioXtreamerDlg.h"
+#include "AppLog.h"
 
 
 
@@ -146,6 +147,7 @@ void CAudioXtreamerDlg::OnBnClickedCheck1()
 
 void CAudioXtreamerDlg::OnOpen()
 {
+  AppLog::Info("UI", "Manual device open requested");
   if (mDevice.Open())
   {
     HWND hwnd = GetDlgItem(IDC_BUTTON1)->GetSafeHwnd();
@@ -157,6 +159,7 @@ void CAudioXtreamerDlg::OnOpen()
 
 void CAudioXtreamerDlg::OnClose()
 {
+  AppLog::Info("UI", "Manual device close requested");
   if ( mDevice.Close()){
     HWND hwnd = GetDlgItem(IDC_BUTTON1)->GetSafeHwnd();
     ::EnableWindow(hwnd, TRUE);
@@ -177,12 +180,14 @@ void CAudioXtreamerDlg::OnRecvAsync()
 
 void CAudioXtreamerDlg::OnStartStream()
 {
+  AppLog::Info("UI", "Manual stream start requested");
   mDevice.Start();
 }
 
 
 void CAudioXtreamerDlg::OnStopStream()
 {
+  AppLog::Info("UI", "Manual stream stop requested");
   mDevice.Stop(true);
 }
 

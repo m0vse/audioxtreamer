@@ -7,6 +7,7 @@ typedef struct _UsbDeviceStatus
   uint32_t ResyncErrors;
   uint32_t FifoLevel;
   uint32_t OutSkipCount;
+  uint32_t OutRefillCount;
   uint32_t InFullCount;
   uint32_t LastSR;
   uint32_t SwSR;

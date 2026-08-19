@@ -10,6 +10,7 @@
 
 #include "ZTEXDev\ztexdev.h"
 #include "resource.h"
+#include "AudioXtreamer\AppLog.h"
 
 
 #include <tchar.h>
@@ -37,6 +38,61 @@ int gcd(int a, int b)
 
 using namespace ASIOSettings;
 
+namespace
+{
+  const uint32_t FpgaCookie = 0x47545254; // "TRTG" in the LSI register byte order
+  const uint32_t FpgaInterfaceVersion = 4;
+  const uint8_t FpgaSettingsRegister = 4;
+  const uint32_t FpgaControlMute = 0x00000080;
+  const LONG OutputGainUnity = 256;
+
+  int SetFpgaMuteVerified(HANDLE handle, bool mute, uint32_t& readback)
+  {
+    int lastStatus = -1;
+    for (int attempt = 0; attempt < 3; ++attempt)
+    {
+      const int64_t current = ztex_default_lsi_get1(handle, FpgaSettingsRegister);
+      if (current < 0)
+      {
+        lastStatus = static_cast<int>(current);
+        continue;
+      }
+
+      uint32_t desired = static_cast<uint32_t>(current);
+      if (mute)
+        desired |= FpgaControlMute;
+      else
+        desired &= ~FpgaControlMute;
+
+      // The XLabs firmware requires vendor request 0x70 before each LSI
+      // register change. It also resets the USB FIFOs, so callers must only
+      // change mute while transfers are stopped or are about to be stopped.
+      lastStatus = ztex_xlabs_init_fifos(handle);
+      if (lastStatus < 0)
+        continue;
+
+      lastStatus = ztex_default_lsi_set1(handle, FpgaSettingsRegister, desired);
+      if (lastStatus < 0)
+        continue;
+
+      const int64_t verified = ztex_default_lsi_get1(handle, FpgaSettingsRegister);
+      if (verified < 0)
+      {
+        lastStatus = static_cast<int>(verified);
+        continue;
+      }
+
+      readback = static_cast<uint32_t>(verified);
+      if ((readback & FpgaControlMute) == (desired & FpgaControlMute))
+        return 0;
+
+      lastStatus = -1000; // the LSI transaction succeeded but the FPGA did not retain the bit
+      Sleep(1);
+    }
+    return lastStatus;
+  }
+}
+
 uint8_t setyb[256];
 
 CypressDevice::CypressDevice(UsbDeviceClient & client )
@@ -48,6 +104,21 @@ CypressDevice::CypressDevice(UsbDeviceClient & client )
   , mASIOHandle(NULL)
   , mTxRequests(nullptr)
   , mRxRequests(nullptr)
+  , mLastLoggedStatus({ 0 })
+  , mLastOpenFailureLog(0)
+  , mLastFpgaProgramAttempt(0)
+  , mQueueFullLogged(false)
+  , mMuteRequestHandle(NULL)
+  , mMuteAckHandle(NULL)
+  , mMuteCommand(-1)
+  , mMuteRequestSucceeded(FALSE)
+  , mOutputGain(0)
+  , mOutputGainTarget(0)
+  , mFpgaMuted(TRUE)
+  , mAutoUnmutePending(false)
+  , mOutputSignalLogged(false)
+  , mOutputSilenceLogged(false)
+  , mOutputSignalStart(0)
 {
   LOG0("CypressDevice::CypressDevice");
 
@@ -56,6 +127,8 @@ CypressDevice::CypressDevice(UsbDeviceClient & client )
   mDevHandle = INVALID_HANDLE_VALUE;
   hth_Worker = INVALID_HANDLE_VALUE;
   mExitHandle = INVALID_HANDLE_VALUE;
+  mMuteRequestHandle = CreateEvent(NULL, FALSE, FALSE, NULL);
+  mMuteAckHandle = CreateEvent(NULL, FALSE, FALSE, NULL);
 
 
   hSem = CreateSemaphore(
@@ -83,20 +156,30 @@ CypressDevice::CypressDevice(UsbDeviceClient & client )
 
   if (bits)
   {
-    mResourceSize = SizeofResource(NULL, hrc);
-    
-    uint8_t * bitstream = (uint8_t *)malloc(mResourceSize +512);
-    ZeroMemory(bitstream, 512);
+    const uint32_t resourceSize = SizeofResource(NULL, hrc);
+    const uint32_t prefixSize = 512;
+    const uint32_t usbPacketSize = 64;
+    // The FX2 configuration path needs a short final USB packet to clock the
+    // Spartan-6 through startup. Add one trailing zero clock byte only when
+    // the prefixed bitstream would otherwise end exactly on a packet boundary.
+    const uint32_t suffixSize = ((prefixSize + resourceSize) % usbPacketSize) == 0 ? 1 : 0;
+    mResourceSize = prefixSize + resourceSize + suffixSize;
 
-    uint8_t* buf = bitstream + 512;
-    for (uint32_t c = 0; c < mResourceSize; c++, buf++) {
+    uint8_t * bitstream = (uint8_t *)malloc(mResourceSize);
+    ZeroMemory(bitstream, mResourceSize);
+
+    uint8_t* buf = bitstream + prefixSize;
+    for (uint32_t c = 0; c < resourceSize; c++, buf++) {
       register uint8_t b = bits[c];
       *buf = setyb[b];
     }
 
     mBitstream = bitstream;
-    mResourceSize += 512;
+    AppLog::Info("FPGA", "Embedded FPGA bitstream loaded (%u bytes; trailing clock byte=%s)",
+      mResourceSize, suffixSize ? "yes" : "no");
   }
+  else
+    AppLog::Error("FPGA", "Embedded FPGA bitstream resource is missing");
 }
 
 CypressDevice::~CypressDevice()
@@ -113,18 +196,30 @@ CypressDevice::~CypressDevice()
 
 
   CloseHandle(hSem);
+  if (mMuteRequestHandle)
+    CloseHandle(mMuteRequestHandle);
+  if (mMuteAckHandle)
+    CloseHandle(mMuteAckHandle);
 }
 
 bool CypressDevice::Start()
 {
   LOG0("CypressDevice::Start");
-  if (mDevHandle == INVALID_HANDLE_VALUE)
+  if (mDevHandle == INVALID_HANDLE_VALUE) {
+    LogOpenFailure("Cannot start because the USB device is not open");
     return false;
+  }
   //let's try to identify the fpga
   int64_t get_result = ztex_default_lsi_get1(mDevHandle, 0);
-  static const char* trtg = "TRTG";
-  if (get_result != *(uint32_t*)trtg )
+  if (get_result != FpgaCookie) {
+    LogOpenFailure("FPGA identity check failed (TRTG cookie not found)");
     return false;
+  }
+  get_result = ztex_default_lsi_get1(mDevHandle, 1);
+  if (get_result != FpgaInterfaceVersion) {
+    LogOpenFailure("FPGA interface version is incompatible");
+    return false;
+  }
 
 
   if (hth_Worker != INVALID_HANDLE_VALUE) {
@@ -134,11 +229,17 @@ bool CypressDevice::Start()
       return true;
   }
 
+  InterlockedExchange(&mOutputGain, 0);
+  InterlockedExchange(&mOutputGainTarget, 0);
+  mAutoUnmutePending = true;
+
   hth_Worker = (HANDLE)_beginthread(StaticWorkerThread, 0, this);
   if (hth_Worker != INVALID_HANDLE_VALUE) {
     ::SetThreadPriority(hth_Worker, THREAD_PRIORITY_TIME_CRITICAL);
+    AppLog::Info("Stream", "USB worker thread created");
     return true;
   }
+  AppLog::Error("Stream", "Could not create the USB worker thread");
   return false;
 }
 
@@ -146,11 +247,26 @@ bool CypressDevice::Stop(bool wait)
 {
   LOG0("CypressDevice::Stop");
 
-  
+
   if (mExitHandle != INVALID_HANDLE_VALUE) {
+    InterlockedExchange(&mOutputGainTarget, 0);
+    const DWORD fadeStart = GetTickCount();
+    while (InterlockedCompareExchange(&mOutputGain, 0, 0) != 0 &&
+           GetTickCount() - fadeStart < 100)
+      Sleep(1);
+
+    if (InterlockedCompareExchange(&mOutputGain, 0, 0) != 0)
+      AppLog::Warning("Stream", "Output fade-down did not complete before its 100 ms timeout");
+    else
+      Sleep(15); // allow queued USB/FIFO samples at zero gain to reach the pins
+
+    if (!RequestFpgaMute(true, 250))
+      AppLog::Warning("FPGA", "Could not confirm output mute before stopping the stream");
+
     BOOL result = SetEvent(mExitHandle);
     if (result == 0) {
       LOG0("CypressDevice::Stop SetEvent Exit FAILED!");
+      AppLog::Error("Stream", "Could not signal the USB worker to stop (Windows error %lu)", GetLastError());
       wait = false;
     }
 
@@ -159,6 +275,7 @@ bool CypressDevice::Stop(bool wait)
       hth_Worker = INVALID_HANDLE_VALUE;
     }
 
+    AppLog::Info("Stream", "USB worker stop requested%s", wait ? " and completed" : "");
     return true;
   }
   else
@@ -172,15 +289,24 @@ bool CypressDevice::Open()
   LOG0("CypressDevice::Open");
   HANDLE handle = INVALID_HANDLE_VALUE;
   ztex_device_info info;
+  int status = 1;
+  bool compatible = false;
+  bool programmed = false;
+  int64_t fpgaCookie = -1;
+  int64_t fpgaVersion = -1;
+  int identityAttempt = 0;
+  int identityAttempts = 1;
   mDefOutEP = 0;
   mDefInEP = 0;
   memset(&info, 0, sizeof(ztex_device_info));
+  const char* failure = "AudioXtreamer WinUSB interface was not found";
 
   if (!bknd_open(handle, mFileHandle))
     goto err;
 
-  int status = ztex_get_device_info(handle, &info);
+  status = ztex_get_device_info(handle, &info);
   if (status < 0) {
+    failure = "Could not read ZTEX device information";
     fprintf(stderr, "Error: Unable to get device info\n");
     goto err;
   }
@@ -188,19 +314,34 @@ bool CypressDevice::Open()
   mDefInEP = 0x82;//info.default_in_ep;
   mDefOutEP = 0x8;//info.default_out_ep;
 
-  /*status = ztex_get_fpga_config(handle);
-  if (status == -1)
-    goto err;
-  else if (status == 0)*/
+  status = ztex_get_fpga_config(handle);
+  if (status > 0)
   {
+    fpgaCookie = ztex_default_lsi_get1(handle, 0);
+    fpgaVersion = ztex_default_lsi_get1(handle, 1);
+    compatible = fpgaCookie == FpgaCookie && fpgaVersion == FpgaInterfaceVersion;
+  }
+
+  if (!compatible)
+  {
+    const DWORD now = GetTickCount();
+    if (mLastFpgaProgramAttempt != 0 && now - mLastFpgaProgramAttempt < 5000) {
+      failure = "FPGA image is incompatible or not responding; waiting before another download";
+      goto err;
+    }
+    mLastFpgaProgramAttempt = now;
+    AppLog::Info("FPGA", "Loading embedded FPGA image (configured=%s, detected interface version=%lld)",
+      status > 0 ? "yes" : "no", fpgaVersion);
 
    if (mBitstream != nullptr) {
 #define EP0_TRANSACTION_SIZE 2048
 
       // reset FPGA
       status = (BOOL)control_transfer(handle, 0x40, 0x31, 0, 0, NULL, 0, 1500);
-      if (status != 0)
+      if (status != 0) {
+        failure = "FPGA reset request failed";
         goto err;
+      }
       // transfer data
 
       uint32_t last_idx = mResourceSize % EP0_TRANSACTION_SIZE;
@@ -209,18 +350,23 @@ bool CypressDevice::Open()
       for (int i = 0; (status >= 0) && (i < bufs_idx); i++)
       {
         status = (BOOL)control_transfer(handle, 0x40, 0x32, 0, 0, mBitstream + (i * EP0_TRANSACTION_SIZE), EP0_TRANSACTION_SIZE, 1500);
-        if (EP0_TRANSACTION_SIZE != status)
+        if (EP0_TRANSACTION_SIZE != status) {
+          failure = "FPGA bitstream transfer failed";
           goto err;
+        }
       }
 
       if (last_idx)
       {
         status = (BOOL)control_transfer(handle, 0x40, 0x32, 0, 0, mBitstream + bufs_idx * EP0_TRANSACTION_SIZE, last_idx, 1500);
-        if (last_idx != status)
+        if (last_idx != status) {
+          failure = "Final FPGA bitstream transfer failed";
           goto err;
+        }
       }
 
     } else {
+     failure = "No FPGA bitstream is embedded in the application";
      goto err;
     }
 
@@ -228,30 +374,60 @@ bool CypressDevice::Open()
     // check config
     status = ztex_get_fpga_config(handle);
     if (status < 0) {
+      failure = "Could not read FPGA configuration state";
       fprintf(stderr, "Error: Unable to get FPGA configuration state\n");
       goto err;
     }
     else if (status == 0) {
+      failure = "FPGA rejected the downloaded bitstream";
       fprintf(stderr, "Error: FPGA not configured\n");
       goto err;
     }
+    programmed = true;
+  }
+  else
+  {
+    AppLog::Info("FPGA", "Reusing compatible FPGA image (interface version %u)", FpgaInterfaceVersion);
   }
 
-  ztex_default_reset(handle, 0);
+  identityAttempts = 100;
+  for (identityAttempt = 0; identityAttempt < identityAttempts; ++identityAttempt)
+  {
+    Sleep(10);
+    fpgaCookie = ztex_default_lsi_get1(handle, 0);
+    fpgaVersion = ztex_default_lsi_get1(handle, 1);
+    if (fpgaCookie == FpgaCookie && fpgaVersion == FpgaInterfaceVersion)
+      break;
+  }
+  if (fpgaCookie != FpgaCookie || fpgaVersion != FpgaInterfaceVersion) {
+    AppLog::Warning("FPGA", "Identity verification did not settle after %d attempt(s): cookie=0x%08llX version=0x%08llX",
+      identityAttempts, fpgaCookie, fpgaVersion);
+    failure = "FPGA identity or interface version verification failed";
+    goto err;
+  }
+
+  // LSI writes are not reliable until the streaming alternate interface and
+  // FIFOs have been initialised by the worker. Keep the desired state muted;
+  // main() writes and verifies the muted configuration before starting I/O.
+  InterlockedExchange(&mFpgaMuted, TRUE);
 
   status = 0;
   goto noerr;
 
 err:
   status = 1;
+  LogOpenFailure(failure);
   if (handle != INVALID_HANDLE_VALUE)
     bknd_close(handle, mFileHandle);
 
 noerr:
 
   mDevHandle = status == 0 ? handle : INVALID_HANDLE_VALUE;
-  if (status == 0)
+  if (status == 0) {
+    AppLog::Info("FPGA", "%s FPGA configuration verified; mute will be verified before streaming",
+      programmed ? "New" : "Existing");
     return true;
+  }
   else
     return false;
 }
@@ -275,9 +451,66 @@ bool CypressDevice::Close()
     //wait for disconnection before a reattempt to open
     Sleep(10);
     mDevHandle = INVALID_HANDLE_VALUE;
+    AppLog::Info("Device", "USB device closed");
   }
 
   return true;
+}
+
+void CypressDevice::LogOpenFailure(const char* reason)
+{
+  const DWORD now = GetTickCount();
+  if (mLastOpenFailureLog == 0 || now - mLastOpenFailureLog >= 10000)
+  {
+    AppLog::Warning("Device", "%s; retrying", reason);
+    mLastOpenFailureLog = now;
+  }
+}
+
+bool CypressDevice::SetFpgaMute(bool mute)
+{
+  if (mDevHandle == INVALID_HANDLE_VALUE)
+    return false;
+
+  const LONG requested = mute ? TRUE : FALSE;
+  uint32_t readback = 0;
+  const int status = SetFpgaMuteVerified(mDevHandle, mute, readback);
+  if (status < 0) {
+    AppLog::Error("FPGA", "Could not verify output %s (status %d, register 4 readback 0x%08X)",
+      mute ? "mute" : "unmute", status, readback);
+    return false;
+  }
+
+  InterlockedExchange(&mFpgaMuted, requested);
+  AppLog::Info("FPGA", "Outputs %s (verified register 4=0x%08X)",
+    mute ? "muted" : "unmuted", readback);
+  return true;
+}
+
+bool CypressDevice::RequestFpgaMute(bool mute, DWORD timeoutMs)
+{
+  const LONG requested = mute ? TRUE : FALSE;
+  if (InterlockedCompareExchange(&mFpgaMuted, requested, requested) == requested)
+    return true;
+  if (!mMuteRequestHandle || !mMuteAckHandle)
+    return false;
+
+  ResetEvent(mMuteAckHandle);
+  InterlockedExchange(&mMuteRequestSucceeded, FALSE);
+  InterlockedExchange(&mMuteCommand, requested);
+  if (!SetEvent(mMuteRequestHandle))
+    return false;
+
+  return WaitForSingleObject(mMuteAckHandle, timeoutMs) == WAIT_OBJECT_0 &&
+    InterlockedCompareExchange(&mMuteRequestSucceeded, FALSE, FALSE) != FALSE;
+}
+
+void CypressDevice::MuteRequestCB()
+{
+  const LONG command = InterlockedExchange(&mMuteCommand, -1);
+  const bool succeeded = command >= 0 && SetFpgaMute(command != FALSE);
+  InterlockedExchange(&mMuteRequestSucceeded, succeeded ? TRUE : FALSE);
+  SetEvent(mMuteAckHandle);
 }
 
 //---------------------------------------------------------------------------------------------
@@ -372,6 +605,10 @@ void CypressDevice::main()
   OUTBuffSize = OUTStride * nrSamples;
 
   ZeroMemory(&mDevStatus, sizeof(mDevStatus));
+  ZeroMemory(&mLastLoggedStatus, sizeof(mLastLoggedStatus));
+  mQueueFullLogged = false;
+  AppLog::Info("Stream", "Configuration: inputs=%u outputs=%u buffer=%u samples FIFO=%u samples",
+    nrIns, nrOuts, nrSamples, fifoDepth);
 
   // configure the fpga channel params
   union {
@@ -385,6 +622,8 @@ void CypressDevice::main()
   } ch_params = {
     nrOuts, nrIns, fifoDepth, 0
   };
+  if (InterlockedCompareExchange(&mFpgaMuted, FALSE, FALSE) != FALSE)
+    ch_params.u32 |= FpgaControlMute;
 
   uint8_t* mINBuff = nullptr, * mOUTBuff = nullptr;
   devClient.AllocBuffers(INBuffSize * 2, mINBuff, OUTBuffSize * 2, mOUTBuff);
@@ -425,6 +664,8 @@ void CypressDevice::main()
         for (uint8_t c = 0; c < rxpktCount; ++c)
           *(uint32_t*)(mTxRequests[i].buff + (rxpktSize * c)) = 0xaa5555aa;
       }
+      else
+        AppLog::Error("USB", "Could not initialise output isochronous transfer %u", i);
     }
 
     if (AudioIn) {
@@ -436,6 +677,8 @@ void CypressDevice::main()
       if (bknd_init_xfer(mDevHandle, &mRxRequests[i], rxpktCount, rxpktSize)) {
         mRxRequests[i].ovlp.hEvent = CreateEvent(NULL, FALSE, FALSE, nullptr);
       }
+      else
+        AppLog::Error("USB", "Could not initialise input isochronous transfer %u", i);
     }
   }
 
@@ -461,6 +704,8 @@ void CypressDevice::main()
   mFeedbackWrite = 0;
   mFeedbackCount = 0;
   ClientActive = false;
+  InterlockedExchange(&mOutputGain, 0);
+  InterlockedExchange(&mOutputGainTarget, 0);
 
   mTxReqIdx = 0;
   mRxReqIdx = 0;
@@ -483,19 +728,46 @@ void CypressDevice::main()
 
   HANDLE timerH = CreateWaitableTimer(NULL, FALSE, nullptr);
   LARGE_INTEGER li;
-  li.QuadPart = -2500000;//in 200ms
+  li.QuadPart = -100000; // first status read after 10 ms; subsequent reads every 250 ms
   SetWaitableTimer(timerH, &li, 250, NULL, NULL, false);
 
-  uint32_t status = 0;
-  status = ztex_xlabs_init_fifos(mDevHandle);
-  status = ztex_default_lsi_set1(mDevHandle, 4, ch_params.u32);
+  bool streamConfigFailed = false;
+  int32_t status = ztex_xlabs_init_fifos(mDevHandle);
+  if (status < 0) {
+    AppLog::Error("FPGA", "FIFO initialisation failed (status %d)", status);
+    streamConfigFailed = true;
+  }
+  status = ztex_default_lsi_set1(mDevHandle, FpgaSettingsRegister, ch_params.u32);
+  if (status < 0) {
+    AppLog::Error("FPGA", "Stream configuration write failed (status %d)", status);
+    streamConfigFailed = true;
+  }
+  else if (!SetFpgaMute(true)) {
+    AppLog::Error("FPGA", "Muted stream configuration could not be verified");
+    streamConfigFailed = true;
+  }
+  else if (!SetFpgaMute(false)) {
+    AppLog::Error("FPGA", "Outputs could not be unmuted before starting USB transfers");
+    streamConfigFailed = true;
+  }
+  else {
+    // Unmuting above necessarily resets the FX2 FIFOs. Do it before any
+    // isochronous requests are submitted so an already-active ASIO client
+    // cannot observe a broken packet stream after Stop/Start.
+    mAutoUnmutePending = false;
+  }
+  if (streamConfigFailed)
+  {
+    ErrorBreak = true;
+    SetEvent(mExitHandle);
+  }
 
   for (uint32_t i = 0; i < NrXfers; ++i)
   {
-    if (AudioOut)
+    if (!streamConfigFailed && AudioOut)
       bknd_iso_write(&mTxRequests[i]);
 
-    if (AudioIn)
+    if (!streamConfigFailed && AudioIn)
       bknd_iso_read(&mRxRequests[i]);
   }
 
@@ -508,19 +780,21 @@ void CypressDevice::main()
       timerH,
       mXferEp0Status.ovlp.hEvent,
       mASIOHandle,
+      mMuteRequestHandle,
       mRxRequests[mRxReqIdx].ovlp.hEvent,
       mTxRequests[mTxReqIdx].ovlp.hEvent
     };
-    uint8_t event_count = 2 + (AudioIn || AudioOut? 1:0) + (AudioIn ? 1: 0) + (AudioOut? 1:0);
+    uint8_t event_count = (uint8_t)_countof(events);
     DWORD wfmo = WaitForMultipleObjects( event_count, events, false, 200);
 
     switch (wfmo)
     {
-    case WAIT_OBJECT_0    : TimerCB();      break;// 1/4 sec timer 
+    case WAIT_OBJECT_0    : TimerCB();      break;// 1/4 sec timer
     case WAIT_OBJECT_0 + 1: Ep0StatusCB();  break;
     case WAIT_OBJECT_0 + 2: AsioClientCB(); break;//ASIO ready
-    case WAIT_OBJECT_0 + 3: RxIsochCB();    break;//rx isoch
-    case WAIT_OBJECT_0 + 4: TxIsochCB();    break;//tx iso
+    case WAIT_OBJECT_0 + 3: MuteRequestCB(); break;
+    case WAIT_OBJECT_0 + 4: RxIsochCB();    break;//rx isoch
+    case WAIT_OBJECT_0 + 5: TxIsochCB();    break;//tx iso
     case WAIT_TIMEOUT:
       LOG0("USB worker timed out waiting for an event");
       break;
@@ -529,11 +803,13 @@ void CypressDevice::main()
       if (wfmo == 0xffffffff)
       {
         LOGN("Wait error 0x%08X GetLastError:0x%08X\n", wfmo, GetLastError());
+        AppLog::Error("USB", "Worker wait failed (Windows error 0x%08lX)", GetLastError());
         Sleep(100);//otherwise we will block the universe
       }
       else
       {
         LOGN("Wait failed 0x%08X\n", wfmo);
+        AppLog::Error("USB", "Worker received an unexpected wait result 0x%08lX", wfmo);
         ErrorBreak = true;
         SetEvent(mExitHandle);
       }
@@ -570,12 +846,16 @@ void CypressDevice::main()
   CloseHandle(mXferEp0Status.ovlp.hEvent);
   bknd_xfer_cleanup(&mXferEp0Status);
 
+  if (ErrorBreak)
+    SetFpgaMute(true);
+
   bknd_select_alt_ifc(mDevHandle, 0); //release the bandwidth
 
   AvRevertMmThreadCharacteristics(AvrtHandle);
 
   CloseHandle(mExitHandle);
   mExitHandle = INVALID_HANDLE_VALUE;
+  AppLog::Info("Stream", "USB worker thread exited%s", ErrorBreak ? " after an error" : " normally");
   LOG0("CypressDevice::main Exit");
 }
 
@@ -615,6 +895,42 @@ uint32_t DistributeSamples(uint8_t* uf_ptrs[rxpktCount], uint8_t spp[rxpktCount]
       spNr++;
   }
   return progress - nrSamples;
+}
+
+void CypressDevice::ApplyOutputGain(uint8_t* buffer, const uint8_t packetSamples[IsoPacketCount])
+{
+  LONG gain = InterlockedCompareExchange(&mOutputGain, 0, 0);
+
+  for (uint8_t packet = 0; packet < IsoPacketCount; ++packet)
+  {
+    uint8_t* frame = buffer + (rxpktSize * packet);
+    for (uint8_t sampleIndex = 0; sampleIndex < packetSamples[packet]; ++sampleIndex)
+    {
+      const LONG target = InterlockedCompareExchange(&mOutputGainTarget, 0, 0);
+      if (gain < target)
+        ++gain;
+      else if (gain > target)
+        --gain;
+
+      for (uint32_t channelOffset = 0; channelOffset < OUTStride; channelOffset += 3)
+      {
+        uint8_t* sampleBytes = frame + channelOffset;
+        int32_t sample = sampleBytes[0] |
+          (static_cast<int32_t>(sampleBytes[1]) << 8) |
+          (static_cast<int32_t>(sampleBytes[2]) << 16);
+        if (sample & 0x00800000)
+          sample -= 0x01000000;
+
+        const int32_t scaled = static_cast<int32_t>((static_cast<int64_t>(sample) * gain) >> 8);
+        sampleBytes[0] = static_cast<uint8_t>(scaled);
+        sampleBytes[1] = static_cast<uint8_t>(scaled >> 8);
+        sampleBytes[2] = static_cast<uint8_t>(scaled >> 16);
+      }
+      frame += OUTStride;
+    }
+  }
+
+  InterlockedExchange(&mOutputGain, gain);
 }
 
 void CypressDevice::TxIsochCB()
@@ -668,6 +984,39 @@ void CypressDevice::TxIsochCB()
           }
         }
 
+        if (ClientActive && !mOutputSignalLogged)
+        {
+          bool hasSignal = false;
+          for (uint8_t packet = 0; packet < rxpktCount && !hasSignal; ++packet)
+          {
+            const uint8_t* sample = ptr + (rxpktSize * packet);
+            const uint32_t audioBytes = packetSamples[packet] * OUTStride;
+            for (uint32_t offset = 0; offset < audioBytes; ++offset)
+            {
+              if (sample[offset] != 0)
+              {
+                hasSignal = true;
+                break;
+              }
+            }
+          }
+
+          if (hasSignal)
+          {
+            mOutputSignalLogged = true;
+            AppLog::Info("ASIO", "Non-zero host audio reached the USB output path (gain=%ld/256, target=%ld/256)",
+              InterlockedCompareExchange(&mOutputGain, 0, 0),
+              InterlockedCompareExchange(&mOutputGainTarget, 0, 0));
+          }
+          else if (!mOutputSilenceLogged && GetTickCount() - mOutputSignalStart >= 2000)
+          {
+            mOutputSilenceLogged = true;
+            AppLog::Warning("ASIO", "Host output buffers have remained silent for two seconds");
+          }
+        }
+
+        ApplyOutputGain(ptr, packetSamples);
+
         // WinUSB always transmits the complete registered buffer. Mark the logical
         // end of every microframe so trailing zeroes are not parsed as audio.
         for (uint8_t c = 0; c < rxpktCount; ++c)
@@ -691,6 +1040,22 @@ void CypressDevice::TimerCB()
     count = 0;
     mDevStatus.SwSR = sSampleCounter;
     sSampleCounter = 0;
+
+    if (mDevStatus.ResyncErrors != mLastLoggedStatus.ResyncErrors ||
+        mDevStatus.OutSkipCount != mLastLoggedStatus.OutSkipCount ||
+        mDevStatus.OutRefillCount != mLastLoggedStatus.OutRefillCount ||
+        mDevStatus.InFullCount != mLastLoggedStatus.InFullCount ||
+        mDevStatus.Ep6IsoErr != mLastLoggedStatus.Ep6IsoErr)
+    {
+      AppLog::Warning("Stream",
+        "Transport anomaly counters changed: host resync=%u, FPGA output refills=%u, "
+        "FPGA empty reads=%u, capture FIFO full=%u, USB capture errors=%u; "
+        "output FIFO=%u/256 (target=%u), received samples=%u/s (hardware rate=%u Hz)",
+        mDevStatus.ResyncErrors, mDevStatus.OutRefillCount, mDevStatus.OutSkipCount,
+        mDevStatus.InFullCount, mDevStatus.Ep6IsoErr, mDevStatus.FifoLevel,
+        theSettings[FifoDepth].val, mDevStatus.SwSR, mDevStatus.LastSR);
+      mLastLoggedStatus = mDevStatus;
+    }
   }
 
   control_xfer(mXferEp0Status);
@@ -719,14 +1084,29 @@ void CypressDevice::Ep0StatusCB()
     } & s = *(struct SampleRateStatus*)mXferEp0Status.buff;
 
     uint32_t SR = ConvertSampleRate(s.sr);
-    if (mDevStatus.LastSR != SR && mDevStatus.LastSR != -1 && mDevStatus.LastSR != 0)
-      devClient.SampleRateChanged();
+    if (mDevStatus.LastSR != SR)
+    {
+      if (mDevStatus.LastSR != -1 && mDevStatus.LastSR != 0)
+      {
+        AppLog::Warning("Clock", "Hardware sample rate changed from %u Hz to %u Hz", mDevStatus.LastSR, SR);
+        devClient.SampleRateChanged();
+      }
+      else if (SR != 0)
+        AppLog::Info("Clock", "Hardware sample rate detected: %u Hz", SR);
+      else
+        AppLog::Warning("Clock", "Hardware sample rate could not be recognised (raw value %u)", s.sr);
+    }
 
     mDevStatus.LastSR = SR;
     mDevStatus.FifoLevel = s.fifo;
+    if (mAutoUnmutePending)
+    {
+      if (SetFpgaMute(false))
+        mAutoUnmutePending = false;
+    }
     mXferEp0Status.stp.wIndex = 3;
   }
-  else
+  else if (mXferEp0Status.stp.wIndex == 3)
   {
     struct FifoErrorStatus
     {
@@ -736,6 +1116,11 @@ void CypressDevice::Ep0StatusCB()
 
     mDevStatus.OutSkipCount = s.outSkip;
     mDevStatus.InFullCount = s.inFull;
+    mXferEp0Status.stp.wIndex = 6;
+  }
+  else
+  {
+    mDevStatus.OutRefillCount = *reinterpret_cast<uint32_t*>(mXferEp0Status.buff) & 0xffff;
     mXferEp0Status.stp.wIndex = 2;
   }
 }
@@ -788,12 +1173,19 @@ void CypressDevice::RxIsochCB()
           if (RxBuff == AsioBuff)
             UpdateClient();
 
-          if (AudioOut == false || next != TxBuff)
+          if (AudioOut == false || next != TxBuff) {
             RxBuff = next;
+            mQueueFullLogged = false;
+          }
           else
           {
             ClientActive = devClient.ClientPresent();
             LOG0("ASIO queue full!");
+            if (!mQueueFullLogged)
+            {
+              AppLog::Warning("ASIO", "Audio buffer queue became full");
+              mQueueFullLogged = true;
+            }
           }
         }
         else
@@ -841,6 +1233,7 @@ void CypressDevice::RxIsochCB()
 
 void CypressDevice::AsioClientCB()
 {
+        const bool wasActive = ClientActive;
         bool present = devClient.ClientPresent();
         if (present) {
 
@@ -858,6 +1251,17 @@ void CypressDevice::AsioClientCB()
         }
 
         ClientActive = present;
+        if (wasActive != ClientActive)
+        {
+          InterlockedExchange(&mOutputGainTarget, ClientActive ? OutputGainUnity : 0);
+          if (ClientActive)
+          {
+            mOutputSignalLogged = false;
+            mOutputSilenceLogged = false;
+            mOutputSignalStart = GetTickCount();
+          }
+          AppLog::Info("ASIO", "Streaming client %s", ClientActive ? "connected" : "disconnected");
+        }
 }
 
 //---------------------------------------------------------------------------------------------

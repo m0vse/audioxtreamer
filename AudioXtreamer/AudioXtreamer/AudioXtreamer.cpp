@@ -8,6 +8,7 @@
 
 #include "MainFrame.h"
 #include "resource.h"
+#include "AppLog.h"
 
 
 #ifdef _DEBUG
@@ -20,6 +21,7 @@ CAudioXtreamerApp theApp;
 // CAudioXtreamerApp construction
 CAudioXtreamerApp::CAudioXtreamerApp()
 : hMapFile(NULL)
+, hInstanceMutex(NULL)
 , pBuf(nullptr)
 , hAsioEvent(NULL)
 , hXtreamerEvent(NULL)
@@ -31,15 +33,28 @@ CAudioXtreamerApp::CAudioXtreamerApp()
 BOOL CAudioXtreamerApp::InitInstance()
 {
   CWinAppEx::InitInstance();
+  AppLog::Info("App", "Initialising AudioXtreamer");
 
-  hAsioEvent = CreateEvent(NULL, FALSE, TRUE, szNameAsioEvent);
-
+  hInstanceMutex = CreateMutex(NULL, FALSE,
+    _T("AudioXtreamer_{25CBA31C-951A-48C6-B513-012E1E2D09D8}_AppMutex"));
+  if (hInstanceMutex == NULL)
+  {
+    AppLog::Error("App", "Could not create the application-instance lock (Windows error %lu)", GetLastError());
+    return FALSE;
+  }
   if (ERROR_ALREADY_EXISTS == GetLastError())
   {
+    AppLog::Warning("App", "A second application instance was rejected");
     MessageBox(0, _T("Only one instance allowed!"), szNameApp, MB_ICONINFORMATION);
     return FALSE;
   }
 
+  hAsioEvent = CreateEvent(NULL, FALSE, TRUE, szNameAsioEvent);
+  if (hAsioEvent == NULL)
+  {
+    AppLog::Error("IPC", "Could not create the ASIO synchronization event (Windows error %lu)", GetLastError());
+    return FALSE;
+  }
   ResetEvent(hAsioEvent);
 
   hXtreamerEvent = CreateEvent(NULL, FALSE, TRUE, szNameXtreamerEvent);
@@ -56,6 +71,7 @@ BOOL CAudioXtreamerApp::InitInstance()
     szNameShMem);            // name of mapping object
 
   if (hMapFile == NULL) {
+    AppLog::Error("IPC", "Could not create shared memory (Windows error %lu)", GetLastError());
     _tprintf(TEXT("Could not create file mapping object (%d).\n"), GetLastError());
     return FALSE;
   }
@@ -67,6 +83,7 @@ BOOL CAudioXtreamerApp::InitInstance()
     0);
 
   if (pBuf == NULL) {
+    AppLog::Error("IPC", "Could not map shared memory (Windows error %lu)", GetLastError());
     _tprintf(TEXT("Could not map view of file (%d).\n"), GetLastError());
     CloseHandle(hMapFile);
 
@@ -75,7 +92,10 @@ BOOL CAudioXtreamerApp::InitInstance()
 
   pMainFrame = new MainFrame(*mDevice);
   if (pMainFrame == nullptr || !pMainFrame->Create(szNameClass, szNameApp))
+  {
+    AppLog::Error("App", "Could not create the application window");
     return FALSE;
+  }
 
   m_pMainWnd = pMainFrame;
   pMainFrame->ShowWindow(SW_HIDE);
@@ -107,6 +127,7 @@ bool CAudioXtreamerApp::Switch(uint32_t timeout, uint32_t rxSampleSize, uint8_t 
   if (SetEvent(hXtreamerEvent) == FALSE)
   {
     DWORD error = GetLastError();
+    AppLog::Error("IPC", "Could not signal the ASIO client (Windows error %lu)", error);
     _tprintf(TEXT("Could not release Mutex (%d).\n"), error);
   }
 
@@ -117,8 +138,11 @@ bool CAudioXtreamerApp::Switch(uint32_t timeout, uint32_t rxSampleSize, uint8_t 
 bool CAudioXtreamerApp::ClientPresent()
 {
   volatile ASIOSettings::StreamInfo* info = (ASIOSettings::StreamInfo*)pBuf;
+  const bool wasActive = mClientActive;
   mClientActive = info->Flags & (uint32_t)0x1 ? true : false;
   info->Flags &= ~(uint32_t)0x1;
+  if (wasActive != mClientActive)
+    AppLog::Info("IPC", "ASIO client heartbeat %s", mClientActive ? "detected" : "lost");
   return mClientActive;
 }
 
@@ -128,24 +152,28 @@ void CAudioXtreamerApp::AllocBuffers(uint32_t rxSize, uint8_t *& rxBuff, uint32_
   rxBuff = (uint8_t*)(pBuf + (1 << SH_MEM_BLK_SIZE_SHIFT));
   txBuff = (uint8_t*)(pBuf + (2 << SH_MEM_BLK_SIZE_SHIFT));
   mClientActive = false;
+  AppLog::Info("IPC", "Shared audio buffers allocated: input=%u bytes output=%u bytes", rxSize, txSize);
 }
 
 void CAudioXtreamerApp::FreeBuffers(uint8_t *& rxBuff, uint8_t *& txBuff)
 {
   rxBuff = nullptr;
   txBuff = nullptr;
+  AppLog::Info("IPC", "Shared audio buffers released");
 }
 
 
 void CAudioXtreamerApp::DeviceStopped(bool error)
 {
   if (error) {
+    AppLog::Error("Device", "USB audio worker stopped because of an error");
     LOG0("CAudioXtreamerApp::DeviceStopped with error");
   }
 }
 
 void CAudioXtreamerApp::SampleRateChanged()
 {
+  AppLog::Warning("Clock", "The hardware sample rate changed while streaming");
   LOG0("CAudioXtreamerApp::SampleRateChanged");
   ASIOSettings::StreamInfo *info = (ASIOSettings::StreamInfo *)pBuf;
   info->Flags |= ((uint32_t)0x2);
@@ -153,6 +181,7 @@ void CAudioXtreamerApp::SampleRateChanged()
 
 int CAudioXtreamerApp::ExitInstance()
 {
+  AppLog::Info("App", "AudioXtreamer shutting down");
   if (m_pMainWnd)
     m_pMainWnd->DestroyWindow(); //and deleted
 
@@ -183,6 +212,11 @@ int CAudioXtreamerApp::ExitInstance()
   if (hMapFile != NULL) {
     CloseHandle(hMapFile);
     hMapFile = NULL;
+  }
+
+  if (hInstanceMutex != NULL) {
+    CloseHandle(hInstanceMutex);
+    hInstanceMutex = NULL;
   }
 
   return CWinAppEx::ExitInstance();

@@ -214,10 +214,14 @@
     <ClInclude Include="..\ZTEXDev\ztexdev.h" />
     <ClInclude Include="ASIOSettings.h" />
     <ClInclude Include="ASIOSettingsFile.h" />
+    <ClInclude Include="AppLog.h" />
     <ClInclude Include="AudioXtreamer.h" />
     <ClInclude Include="AudioXtreamerDlg.h" />
     <ClInclude Include="AudioXtreamerDlg.cpp" />
     <ClInclude Include="MainFrame.h" />
+    <ClInclude Include="DeviceStatusCtrl.h" />
+    <ClInclude Include="LogDlg.h" />
+    <ClInclude Include="LogDlg.cpp" />
     <ClInclude Include="PropertySheetDlg.h" />
     <ClInclude Include="Resource.h" />
     <ClInclude Include="SettingsDlg.h" />
@@ -235,6 +239,7 @@
     <ClCompile Include="..\ZTEXDev\ztexdev.cpp" />
     <ClCompile Include="ASIOSettings.cpp" />
     <ClCompile Include="ASIOSettingsFile.cpp" />
+    <ClCompile Include="AppLog.cpp" />
     <ClCompile Include="AudioXtreamer.cpp" />
     <ClCompile Include="MainFrame.cpp" />
     <ClCompile Include="PropertySheetDlg.cpp" />

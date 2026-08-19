@@ -1,6 +1,39 @@
 # AudioXtreamer
 A simple multichannel USB/FPGA PCM audio interface:
 
+## Current Windows milestone (August 2026)
+
+The project now builds on Windows with Visual Studio 2022 (using the v142
+toolset), Steinberg ASIO SDK 2.3.4, WiX 3, and Xilinx ISE 14.7. A generated
+Spartan-6 image and the 64-bit Windows application/ASIO driver have been tested
+with a ZTEX 2.01 and Yamaha 01X at 44.1 kHz. Multichannel playback is working.
+
+This milestone adds:
+
+- a persistent in-application log with device, ASIO, USB, FIFO, sample-rate,
+  and anomaly reporting;
+- clear connected/running/ASIO-client status indicators;
+- safer device reopen and single-application-instance handling;
+- corrected 32-bit and 64-bit ASIO/COM registration in the x64 MSI;
+- an FPGA interface-v4 output mute with host readback verification, plus a
+  software gain ramp around stream reconfiguration;
+- USB packet/framing, feedback-queue, cleanup, counter, and FPGA-loader fixes;
+- ASIO block choices restricted to powers of two from 16 through 1024;
+- FPGA output-FIFO choices restricted to multiples of 16 from 16 through 240,
+  with 512/64 used as the current conservative test configuration; and
+- an ISE placement setting that completed place-and-route with timing score 0.
+
+**Known limitation:** audio is not yet glitch-free. Logs still show USB capture
+errors, FPGA output refills, FIFO excursions, and occasional host resync events;
+audible clicks have also occurred. A 512-sample ASIO block is the repeatable
+baseline; 1024 samples has produced fewer glitches so far, but neither setting
+has established glitch-free operation. Testing so far used a Dell USB-C dock,
+and direct-USB testing is still pending. Do not treat this milestone as a
+production audio release.
+
+See [the USB audio stability handover](docs/USB_AUDIO_STABILITY_HANDOVER.md) for
+the investigation, build requirements, verified behavior, and remaining work.
+
 <p align="center">
 <img src="/images/1V2A0353.jpg" alt="PCB" width="600" class="center" >
 </p>

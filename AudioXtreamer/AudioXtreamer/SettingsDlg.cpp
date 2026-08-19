@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "SettingsDlg.h"
+#include "AppLog.h"
 
 using namespace ASIOSettings;
 
@@ -118,16 +119,19 @@ inline void ASIOSettingsDlg::OnShowWindow(BOOL bShow, UINT nStatus)
 inline void ASIOSettingsDlg::UpdateRanges(SCType type)
 {
   CDataExchange pDX(this, false);
-  int nrSamples = mSliderSamples.GetPos();
-  int fifoDepth = mSliderFifo.GetPos();
-  mProgressFifo.SetRange(0, fifoDepth);
+  if (type == SCSamples || type == SCBoth)
+    mSamples = SampleCountFromPosition(mSliderSamples.GetPos());
+  if (type == SCFifo || type == SCBoth)
+    mFifo = FifoDepthFromPosition(mSliderFifo.GetPos());
+
+  mProgressFifo.SetRange(0, mFifo);
   TCHAR str[16] = { 0 };
 
-  float inlat = nrSamples * 1000.f / (mLastSR ? mLastSR : 1);
-  float outlat = ((nrSamples + fifoDepth) * 1000.f) / (mLastSR ? mLastSR : 1);
+  float inlat = mSamples * 1000.f / (mLastSR ? mLastSR : 1);
+  float outlat = ((mSamples + mFifo) * 1000.f) / (mLastSR ? mLastSR : 1);
 
   if (type == SCSamples || type == SCBoth) {
-    DDX_Text(&pDX, IDC_STATIC_NRSAMPLES, nrSamples);
+    DDX_Text(&pDX, IDC_STATIC_NRSAMPLES, mSamples);
     if (mLastSR != 0) {
       _stprintf(str, _T("%1.2f ms"), inlat);
       DDX_Text(&pDX, IDC_STATIC_INLAT, str, 8);
@@ -135,7 +139,7 @@ inline void ASIOSettingsDlg::UpdateRanges(SCType type)
   }
 
   if (type == SCFifo || type == SCBoth) {
-    DDX_Text(&pDX, IDC_STATIC_FIFOD, fifoDepth);
+    DDX_Text(&pDX, IDC_STATIC_FIFOD, mFifo);
   }
 
   if (mLastSR != 0) {
@@ -163,21 +167,23 @@ BOOL ASIOSettingsDlg::OnInitDialog()
 
   mIns    = mInfo[NrIns].val;
   mOuts   = mInfo[NrOuts].val;
-  mSamples= mInfo[NrSamples].val;
-  mFifo   = mInfo[FifoDepth].val;
+  mSamples= NormalizeSampleCount(mInfo[NrSamples].val);
+  mFifo   = NormalizeFifoDepth(mInfo[FifoDepth].val);
 
   mListIns.SetCurSel(mIns);
   mListOuts.SetCurSel(mOuts);
 
-  mSliderSamples.SetRangeMin(16);
-  mSliderSamples.SetPos(16);
-  mSliderSamples.SetRangeMax(mInfo[NrSamples].max, TRUE);
-  mSliderSamples.SetPos(mSamples);
+  mSliderSamples.SetRange(0, SampleCountEntryCount - 1, TRUE);
+  mSliderSamples.SetPos(SampleCountToPosition(mSamples));
+  mSliderSamples.SetLineSize(1);
+  mSliderSamples.SetPageSize(1);
 
-  mSliderFifo.SetRangeMin(16);
-  mSliderFifo.SetPos(16);
-  mSliderFifo.SetRangeMax(mInfo[FifoDepth].max, TRUE);
-  mSliderFifo.SetPos(mFifo);
+  mSliderFifo.SetRange(1, mInfo[FifoDepth].max / 16, TRUE);
+  mSliderFifo.SetPos(FifoDepthToPosition(mFifo));
+  mSliderFifo.SetLineSize(1);
+  mSliderFifo.SetPageSize(1);
+
+  UpdateRanges(SCBoth);
 
   SetWindowTheme(mProgressFifo.GetSafeHwnd(), L" ", L" ");
 
@@ -204,9 +210,6 @@ void ASIOSettingsDlg::DoDataExchange(CDataExchange* pDX)
   DDX_CBIndex(pDX, IDC_DL_INS, mIns);
   DDX_CBIndex(pDX, IDC_DL_OUTS, mOuts);
 
-  DDX_Slider(pDX, IDC_SLIDER_SAMPLES, mSamples);
-  DDX_Slider(pDX, IDC_SLIDER_FIFO, mFifo);
-
   DDX_Control(pDX, IDC_PROGRESS_FIFO, mProgressFifo);
 
   //all controls must be subclassed by now
@@ -226,6 +229,8 @@ void ASIOSettingsDlg::OnOK()
 {
   if (mInfo[NrIns].val != mIns || mInfo[NrOuts].val != mOuts || mInfo[NrSamples].val != mSamples || mInfo[FifoDepth].val != mFifo)
   {
+    AppLog::Info("Settings", "Applying stream settings: inputs=%u outputs=%u buffer=%d FIFO=%d",
+      (mIns + 1) * 2, (mOuts + 1) * 2, mSamples, mFifo);
     mDev.Close();
     mInfo[NrIns].val = mIns;
     mInfo[NrOuts].val = mOuts;
@@ -239,5 +244,6 @@ void ASIOSettingsDlg::OnOK()
 
 void ASIOSettingsDlg::OnRestart()
 {
+  AppLog::Info("UI", "Manual device restart requested");
   mDev.Close();
 }

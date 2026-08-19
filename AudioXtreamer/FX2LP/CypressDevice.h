@@ -57,6 +57,11 @@ private:
   void Ep0StatusCB();
 
   void AsioClientCB();
+  void MuteRequestCB();
+  void LogOpenFailure(const char* reason);
+  bool SetFpgaMute(bool mute);
+  bool RequestFpgaMute(bool mute, DWORD timeoutMs);
+  void ApplyOutputGain(uint8_t* buffer, const uint8_t packetSamples[IsoPacketCount]);
 
   XferReq *mRxRequests;
   XferReq *mTxRequests;
@@ -75,6 +80,21 @@ private:
   HANDLE mFileHandle;
   HANDLE hSem;
   UsbDeviceStatus mDevStatus;
+  UsbDeviceStatus mLastLoggedStatus;
+  DWORD mLastOpenFailureLog;
+  DWORD mLastFpgaProgramAttempt;
+  bool mQueueFullLogged;
+  HANDLE mMuteRequestHandle;
+  HANDLE mMuteAckHandle;
+  volatile LONG mMuteCommand;
+  volatile LONG mMuteRequestSucceeded;
+  volatile LONG mOutputGain;
+  volatile LONG mOutputGainTarget;
+  volatile LONG mFpgaMuted;
+  bool mAutoUnmutePending;
+  bool mOutputSignalLogged;
+  bool mOutputSilenceLogged;
+  DWORD mOutputSignalStart;
 
 
   //the Sample where IsoIn data gets transfered

@@ -41,6 +41,7 @@ protected:
   CPngImage m_pngImage;
   CBitmap  m_BitmapTrayIcon;
   UINT_PTR m_nTimerID;
+  bool mWaitingForDeviceLogged;
 
 public:
   afx_msg void OnDestroy();
